@@ -1,0 +1,46 @@
+1. ZeroMq pub/subs send rgb from oak to veiwer page - Done
+2. Touch button switching camera 1 & 2 (using mouse) - Done
+3. Improve publisher image streaming for higher:
+
+reliability - using mjpeg codec compression (25mbps per camera). Switch between camera keyboard 1 and 2
+q to quit. - Done
+
+Temperatures are healthy: tj is ~52°C, so thermal throttling is not currently a concern. RAM is stable around 9.77 GB and swap use is low.
+The concern is CPU: all four active cores are essentially at 96–100%. It may run, but there is little headroom for long-term spikes, UI work, camera reconnects, or other processes.
+For safer continuous operation, reduce the active stream from 30 FPS to 15–20 FPS.
+To reduce resolution and the compression quality -- CPU must be 70%
+
+Sleeps briefly when no camera frame is ready (publisher) and caps GUI redraw frequency (subscriber): -- (DONE)
+
+That is a clear improvement: CPU fell from ~96–100% to roughly 60–82% per active core, with most samples near 70%. Temperature remains excellent at ~52°C, and RAM/swap are stable.
+This is suitable for longer camera-only runs. For adding the MID-360, there is some headroom but not much for a full-rate 3D renderer. Start LiDAR at a downsampled 10 Hz and keep the camera viewer at:
+1280×720, 15 FPS, MJPEG 65, display FPS 20
+If LiDAR pushes CPU above ~85% sustained, reduce the viewer to --display-fps 15 first, then consider 960×540 camera output.
+
+Further improvement:
+
+in priority order:
+
+Set viewer redraw rate to the camera rate:
+--display-fps 15
+
+Your camera provides 15 FPS, so rendering at 20 FPS only redraws duplicate frames. This should reduce CPU a little with no image-quality loss.
+
+Stop the inactive OAK pipeline entirely.
+Currently its localhost stream is paused, but its DepthAI pipeline still runs. Stopping that pipeline saves Orin CPU, OAK processing, and Ethernet/XLink bandwidth. Camera switching will take a short time while the pipeline starts again.
+
+--> Replace MJPEG with H.264/H.265 and use Jetson hardware decoding.
+
+---->This is the largest longer-term optimization. OAK encodes H.264/H.265 efficiently, and the Orin can decode it in hardware. It can retain good 720p/15-FPS quality at a much lower bitrate and substantially reduce CPU versus cv2.imdecode() MJPEG decoding.
+Keep MJPEG quality at 60–65.
+
+Lowering 65 to 60 reduces bandwidth slightly with little visible difference, but it will not greatly reduce CPU—JPEG decoding cost is mainly driven by pixel count.
+For your system, use --display-fps 15 now. For LiDAR, the most valuable next code change is stopping the inactive DepthAI pipeline; 
+the best architecture upgrade is H.264/H.265 plus Jetson hardware decode.
+
+4. Syncronize time between Orin & 2 oak camera
+5. Using pyQt5 display camera switch button (finger touch) and dummy 
+distance sensors values widget
+6. drawing 2 horizontal line using 4 point dot then get 
+distance between rectangle zone. Then draw a single 
+horizontal line under the zone (10mm).
