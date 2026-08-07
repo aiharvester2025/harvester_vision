@@ -119,8 +119,8 @@ if __name__ == "__main__":
         ]
     else:
         cameras_config = args.camera or [
-            ("oak_22", "tcp://localhost:5556", "tcp://localhost:5566"),
-            ("oak_23", "tcp://localhost:5557", "tcp://localhost:5567"),
+            ("docking_camera", "tcp://localhost:5556", "tcp://localhost:5566"),
+            ("cutting_camera", "tcp://localhost:5557", "tcp://localhost:5567"),
         ]
 
     configured_topics = [topic for topic, _, _ in cameras_config]
@@ -157,6 +157,7 @@ if __name__ == "__main__":
             "frame": None,
             "last_seen": 0.0,
             "enabled": topic == active_topic,
+            "metadata": {},
         }
 
         sub_socket.connect(sub_addr)
@@ -212,6 +213,7 @@ if __name__ == "__main__":
                         if frame is not None:
                             camera_state[topic]["frame"] = frame
                             camera_state[topic]["last_seen"] = now
+                            camera_state[topic]["metadata"] = payload
 
                 except zmq.Again:
                     break
@@ -249,6 +251,14 @@ if __name__ == "__main__":
                     2,
                     cv2.LINE_AA,
                 )
+                metadata = state["metadata"]
+                capture_us = metadata.get("timestamp_us")
+                quality = metadata.get("time_quality", "unknown")
+                if capture_us is not None:
+                    capture_text = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(capture_us / 1_000_000))
+                    capture_text += f".{capture_us % 1_000_000:06d} UTC"
+                    cv2.putText(display_frame, f"Capture: {capture_text}", (50, 64), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 255, 255), 1, cv2.LINE_AA)
+                cv2.putText(display_frame, f"Time sync: {quality}", (50, 86), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (0, 255, 0) if quality == "synchronized" else (0, 180, 255), 1, cv2.LINE_AA)
 
             cv2.imshow("OAK RGB Viewer", display_frame)
 

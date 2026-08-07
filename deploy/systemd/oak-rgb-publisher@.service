@@ -1,0 +1,14 @@
+[Unit]
+Description=Harvester OAK RGB publisher (%i)
+Wants=chrony.service
+After=network-online.target chrony.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/marcop/harvester_vision
+ExecStart=/usr/bin/python3 oak_rgb_publisher.py --camera-role %i
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
