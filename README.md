@@ -44,11 +44,28 @@ camera, and sends control commands to pause the other publisher. Start it with:
 python3 oak_rgb_viewer.py --display-fps 15
 ```
 
-Press `1` for the docking camera, `2` for the cutting camera, and `q` or
-`Esc` to exit. The viewer shows the capture UTC timestamp and time-sync health
+Press `1` for the docking camera, `2` for the cutting camera, `3` to toggle
+the Raspberry Pi docking-sensor dashboard overlay, and `q` or `Esc` to exit.
+The viewer shows the capture UTC timestamp and time-sync health
 on live frames. It marks a stream offline after two seconds by default; change
 this with `--timeout`. Use repeated `--camera TOPIC SUB_ADDR CTL_ADDR` options
 to connect to non-default publisher endpoints.
+
+## Docking sensor viewer
+
+The Raspberry Pi at `192.168.50.40` publishes five simulated docking-sensor
+readings on ZeroMQ port `5555`. Run this viewer on the Orin (`192.168.50.10`)
+to display the live measurements, phase, and alignment estimates:
+
+```bash
+python3 sensor_viewer.py
+```
+
+It subscribes to `tcp://192.168.50.40:5555`, topic `harvester.sensors.v1`, by
+default. Use `--host`, `--port`, or `--topic` if the publisher changes. The
+panel indicates stale telemetry after two seconds; press `q` or `Esc` to quit.
+It has no DepthAI dependency, so its subscriber and drawing functions can be
+reused as a later overlay in `oak_rgb_viewer.py`.
 
 ### Stream and resource behavior
 

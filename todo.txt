@@ -42,6 +42,7 @@ the best architecture upgrade is H.264/H.265 plus Jetson hardware decode.
 
 4. Synchronize time between Orin & 2 oak camera -- (DONE)
    with lidar and PLC later. -- (We try to connect with Rasberry Pi with dummy sensor data)
+   Display sensors dummy data on the screen
 
 5. Using pyQt5 display camera switch button (finger touch) and dummy distance sensors values widget
    - currently just use basic display control input using keyboard and mouse click
