@@ -1,0 +1,51 @@
+{
+  "schema": "harvester.frames.v1",
+  "description": "Nominal RViz/Xavier-only geometry. Values are deliberately illustrative and MUST NOT be copied into deployment or used for motion, collision, or safety decisions.",
+  "deployment_policy": "simulation_only",
+  "units": {"length": "m", "angle": "rad"},
+  "transform_notation": "T_parent_child maps a point from child coordinates into parent coordinates: p_parent = R_parent_child * p_child + t_parent_child.",
+  "coordinate_convention": {
+    "mechanical_frames": "+X forward along rail travel toward cutting, +Y left when looking in +X, +Z up; right-handed; SI units.",
+    "camera_optical_frames": "+X image right, +Y image down, +Z out through the lens; right-handed.",
+    "range_sensor_frames": "+X is the positive measured beam direction; distance_m represents [distance_m, 0, 0] only when valid=true.",
+    "lidar_frame": "+X forward, +Y left, +Z up for simulation only. Confirm the installed MID-360 vendor frame before commissioning."
+  },
+  "camera_bindings": {
+    "docking_camera": {"image_frame_id": "docking_camera_optical_frame", "status": "provisional"},
+    "cutting_camera": {"image_frame_id": "cutting_camera_optical_frame", "status": "provisional"}
+  },
+  "lidar_binding": {"device": "MID-360", "frame_id": "mid360_link", "status": "provisional"},
+  "sensor_telemetry_bindings": [
+    {"sensor_id": "S_L1", "telemetry_key": "diagonal_left_45deg", "frame_id": "sensor_diagonal_left_frame", "status": "provisional"},
+    {"sensor_id": "S_R1", "telemetry_key": "diagonal_right_45deg", "frame_id": "sensor_diagonal_right_frame", "status": "provisional"},
+    {"sensor_id": "S_C", "telemetry_key": "center_line", "frame_id": "sensor_center_line_frame", "status": "provisional"},
+    {"sensor_id": "S_L2", "telemetry_key": "c_channel_left", "frame_id": "sensor_c_channel_left_frame", "status": "provisional"},
+    {"sensor_id": "S_R2", "telemetry_key": "c_channel_right", "frame_id": "sensor_c_channel_right_frame", "status": "provisional"}
+  ],
+  "dynamic_transforms": [
+    {
+      "id": "rail_to_base_link",
+      "parent": "rail_frame",
+      "child": "base_link",
+      "provider": "rviz_slider_or_simulator",
+      "nominal_translation_m": [1.5, 0.0, 0.0],
+      "nominal_rotation_rpy_rad": [0.0, 0.0, 0.0],
+      "status": "provisional"
+    }
+  ],
+  "static_transforms": [
+    {"id": "rail_to_docking_reference", "parent": "rail_frame", "child": "docking_reference", "translation_m": [0.0, 0.0, 0.0], "rotation_rpy_rad": [0.0, 0.0, 0.0], "status": "provisional"},
+    {"id": "rail_to_cutting_reference", "parent": "rail_frame", "child": "cutting_reference", "translation_m": [5.0, 0.0, 0.0], "rotation_rpy_rad": [0.0, 0.0, 0.0], "status": "provisional"},
+    {"id": "base_to_docking_camera_link", "parent": "base_link", "child": "docking_camera_link", "translation_m": [0.55, 0.0, 0.85], "rotation_rpy_rad": [0.0, 0.0, 0.0], "status": "provisional"},
+    {"id": "docking_camera_link_to_optical", "parent": "docking_camera_link", "child": "docking_camera_optical_frame", "translation_m": [0.0, 0.0, 0.0], "rotation_rpy_rad": [-1.5707963267948966, 0.0, -1.5707963267948966], "status": "convention"},
+    {"id": "base_to_cutting_camera_link", "parent": "base_link", "child": "cutting_camera_link", "translation_m": [0.8, -0.2, 1.0], "rotation_rpy_rad": [0.0, 0.0, 0.0], "status": "provisional"},
+    {"id": "cutting_camera_link_to_optical", "parent": "cutting_camera_link", "child": "cutting_camera_optical_frame", "translation_m": [0.0, 0.0, 0.0], "rotation_rpy_rad": [-1.5707963267948966, 0.0, -1.5707963267948966], "status": "convention"},
+    {"id": "base_to_mid360_link", "parent": "base_link", "child": "mid360_link", "translation_m": [0.35, 0.0, 1.1], "rotation_rpy_rad": [0.0, 0.0, 0.0], "status": "provisional"},
+    {"id": "docking_reference_to_sensor_array", "parent": "docking_reference", "child": "docking_sensor_array_link", "translation_m": [0.0, 0.0, 0.45], "rotation_rpy_rad": [0.0, 0.0, 0.0], "status": "provisional"},
+    {"id": "sensor_array_to_diagonal_left", "parent": "docking_sensor_array_link", "child": "sensor_diagonal_left_frame", "translation_m": [0.0, 0.28, 0.0], "rotation_rpy_rad": [0.0, 0.0, -0.7853981633974483], "status": "provisional"},
+    {"id": "sensor_array_to_diagonal_right", "parent": "docking_sensor_array_link", "child": "sensor_diagonal_right_frame", "translation_m": [0.0, -0.28, 0.0], "rotation_rpy_rad": [0.0, 0.0, 0.7853981633974483], "status": "provisional"},
+    {"id": "sensor_array_to_center_line", "parent": "docking_sensor_array_link", "child": "sensor_center_line_frame", "translation_m": [0.0, 0.0, 0.0], "rotation_rpy_rad": [0.0, 0.0, 0.0], "status": "provisional"},
+    {"id": "sensor_array_to_c_channel_left", "parent": "docking_sensor_array_link", "child": "sensor_c_channel_left_frame", "translation_m": [0.25, 0.36, 0.0], "rotation_rpy_rad": [0.0, 0.0, 0.0], "status": "provisional"},
+    {"id": "sensor_array_to_c_channel_right", "parent": "docking_sensor_array_link", "child": "sensor_c_channel_right_frame", "translation_m": [0.25, -0.36, 0.0], "rotation_rpy_rad": [0.0, 0.0, 0.0], "status": "provisional"}
+  ]
+}

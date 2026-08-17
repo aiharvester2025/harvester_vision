@@ -151,3 +151,17 @@ combined clock-offset drift exceeds 10 ms.
 
 PTP/Livox and PLC/Modbus timestamp registers are intentionally not configured
 in this phase.
+
+## Frame transforms and calibration foundation
+
+The repository now has a safe, pre-implementation coordinate-frame contract in
+[`calibration/README.md`](calibration/README.md). It defines the rail, harvester,
+OAK camera optical, MID-360, docking-reference, and five range-sensor frames;
+the timestamp/calibration metadata every future spatial measurement must carry;
+and the commissioning sequence.
+
+Use `calibration/frames.nominal.json` only for Xavier/RViz simulation. It uses
+explicitly illustrative mount geometry and the validator rejects it for
+deployment. `calibration/frames.deployment.template.json` intentionally leaves
+all physical survey values blank until a measured, approved calibration session
+is recorded.

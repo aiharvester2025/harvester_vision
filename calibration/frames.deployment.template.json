@@ -1,0 +1,194 @@
+{
+  "schema": "harvester.frames.v1",
+  "description": "Deployment transform registry. Fill only from a recorded survey/calibration session; null is intentional and unsafe for runtime use.",
+  "deployment_policy": "survey_required",
+  "units": {"length": "m", "angle": "rad"},
+  "transform_notation": "T_parent_child maps a point from child coordinates into parent coordinates: p_parent = R_parent_child * p_child + t_parent_child.",
+  "coordinate_convention": {
+    "mechanical_frames": "+X forward along rail travel toward cutting, +Y left when looking in +X, +Z up; right-handed; SI units.",
+    "camera_optical_frames": "+X image right, +Y image down, +Z out through the lens; right-handed.",
+    "range_sensor_frames": "+X is the positive measured beam direction; distance_m represents [distance_m, 0, 0] only when valid=true.",
+    "lidar_frame": "+X forward, +Y left, +Z up unless the installed MID-360 manual for the exact mounting says otherwise. Record the verified vendor frame in the calibration session."
+  },
+  "frame_definitions": {
+    "map": "Optional surveyed site/map frame. Do not use for control until survey control points exist.",
+    "rail_frame": "Station frame. Origin is the docking mechanical datum; X follows rail from docking toward cutting.",
+    "base_link": "Harvester body datum on the rail centreline. Dynamic pose comes from rail/encoder localisation.",
+    "docking_reference": "Fixed docking plane and centreline datum.",
+    "cutting_reference": "Fixed cutting-operation datum.",
+    "docking_camera_link": "Mechanical body frame of the OAK assigned docking_camera.",
+    "docking_camera_optical_frame": "Optical frame for its CAM_A RGB stream.",
+    "cutting_camera_link": "Mechanical body frame of the OAK assigned cutting_camera.",
+    "cutting_camera_optical_frame": "Optical frame for its CAM_A RGB stream.",
+    "mid360_link": "Mechanical/LiDAR coordinate frame for the installed MID-360.",
+    "docking_sensor_array_link": "Fixed mechanical datum for the five docking range sensors.",
+    "sensor_diagonal_left_frame": "Positive beam frame for S_L1.",
+    "sensor_diagonal_right_frame": "Positive beam frame for S_R1.",
+    "sensor_center_line_frame": "Positive beam frame for S_C.",
+    "sensor_c_channel_left_frame": "Positive beam frame for S_L2.",
+    "sensor_c_channel_right_frame": "Positive beam frame for S_R2."
+  },
+  "camera_bindings": {
+    "docking_camera": {
+      "device_address": "192.168.50.21",
+      "camera_socket": "CAM_A",
+      "link_frame": "docking_camera_link",
+      "image_frame_id": "docking_camera_optical_frame",
+      "delivered_image_size_px": [1280, 720],
+      "intrinsics_artifact": "pending",
+      "status": "survey_required"
+    },
+    "cutting_camera": {
+      "device_address": "192.168.50.22",
+      "camera_socket": "CAM_A",
+      "link_frame": "cutting_camera_link",
+      "image_frame_id": "cutting_camera_optical_frame",
+      "delivered_image_size_px": [1280, 720],
+      "intrinsics_artifact": "pending",
+      "status": "survey_required"
+    }
+  },
+  "lidar_binding": {
+    "device": "MID-360",
+    "frame_id": "mid360_link",
+    "serial": null,
+    "extrinsics_artifact": "pending",
+    "status": "survey_required"
+  },
+  "sensor_telemetry_bindings": [
+    {"sensor_id": "S_L1", "telemetry_key": "diagonal_left_45deg", "frame_id": "sensor_diagonal_left_frame", "status": "survey_required"},
+    {"sensor_id": "S_R1", "telemetry_key": "diagonal_right_45deg", "frame_id": "sensor_diagonal_right_frame", "status": "survey_required"},
+    {"sensor_id": "S_C", "telemetry_key": "center_line", "frame_id": "sensor_center_line_frame", "status": "survey_required"},
+    {"sensor_id": "S_L2", "telemetry_key": "c_channel_left", "frame_id": "sensor_c_channel_left_frame", "status": "survey_required"},
+    {"sensor_id": "S_R2", "telemetry_key": "c_channel_right", "frame_id": "sensor_c_channel_right_frame", "status": "survey_required"}
+  ],
+  "dynamic_transforms": [
+    {
+      "id": "rail_to_base_link",
+      "parent": "rail_frame",
+      "child": "base_link",
+      "provider": "future_rail_localisation",
+      "contract": "T_rail_frame_base_link at the measurement timestamp. For constrained rail motion it begins as translation [rail_position_m, 0, 0] and RPY [0, 0, heading_error_rad], then must be replaced by the measured localisation estimate and covariance.",
+      "status": "integration_required"
+    }
+  ],
+  "static_transforms": [
+    {
+      "id": "rail_to_docking_reference",
+      "parent": "rail_frame",
+      "child": "docking_reference",
+      "translation_m": null,
+      "rotation_rpy_rad": null,
+      "status": "survey_required",
+      "evidence_required": "three-point mechanical survey from the rail datum"
+    },
+    {
+      "id": "rail_to_cutting_reference",
+      "parent": "rail_frame",
+      "child": "cutting_reference",
+      "translation_m": null,
+      "rotation_rpy_rad": null,
+      "status": "survey_required",
+      "evidence_required": "three-point mechanical survey from the rail datum"
+    },
+    {
+      "id": "base_to_docking_camera_link",
+      "parent": "base_link",
+      "child": "docking_camera_link",
+      "translation_m": null,
+      "rotation_rpy_rad": null,
+      "status": "survey_required",
+      "evidence_required": "rigid mount survey; change parent to docking_reference if this OAK is station-mounted"
+    },
+    {
+      "id": "docking_camera_link_to_optical",
+      "parent": "docking_camera_link",
+      "child": "docking_camera_optical_frame",
+      "translation_m": [0.0, 0.0, 0.0],
+      "rotation_rpy_rad": [-1.5707963267948966, 0.0, -1.5707963267948966],
+      "status": "convention",
+      "evidence_required": "ROS optical-frame axis convention; lens-origin offset must be added only if vendor calibration exposes it"
+    },
+    {
+      "id": "base_to_cutting_camera_link",
+      "parent": "base_link",
+      "child": "cutting_camera_link",
+      "translation_m": null,
+      "rotation_rpy_rad": null,
+      "status": "survey_required",
+      "evidence_required": "rigid mount survey; change parent to cutting_reference if this OAK is station-mounted"
+    },
+    {
+      "id": "cutting_camera_link_to_optical",
+      "parent": "cutting_camera_link",
+      "child": "cutting_camera_optical_frame",
+      "translation_m": [0.0, 0.0, 0.0],
+      "rotation_rpy_rad": [-1.5707963267948966, 0.0, -1.5707963267948966],
+      "status": "convention",
+      "evidence_required": "ROS optical-frame axis convention; lens-origin offset must be added only if vendor calibration exposes it"
+    },
+    {
+      "id": "base_to_mid360_link",
+      "parent": "base_link",
+      "child": "mid360_link",
+      "translation_m": null,
+      "rotation_rpy_rad": null,
+      "status": "survey_required",
+      "evidence_required": "rigid mount survey plus camera-to-LiDAR target validation"
+    },
+    {
+      "id": "docking_reference_to_sensor_array",
+      "parent": "docking_reference",
+      "child": "docking_sensor_array_link",
+      "translation_m": null,
+      "rotation_rpy_rad": null,
+      "status": "survey_required",
+      "evidence_required": "mechanical survey; reparent to base_link if the sensor array moves with the harvester"
+    },
+    {
+      "id": "sensor_array_to_diagonal_left",
+      "parent": "docking_sensor_array_link",
+      "child": "sensor_diagonal_left_frame",
+      "translation_m": null,
+      "rotation_rpy_rad": null,
+      "status": "survey_required",
+      "evidence_required": "beam-origin, yaw/pitch, range-zero and scale calibration for S_L1"
+    },
+    {
+      "id": "sensor_array_to_diagonal_right",
+      "parent": "docking_sensor_array_link",
+      "child": "sensor_diagonal_right_frame",
+      "translation_m": null,
+      "rotation_rpy_rad": null,
+      "status": "survey_required",
+      "evidence_required": "beam-origin, yaw/pitch, range-zero and scale calibration for S_R1"
+    },
+    {
+      "id": "sensor_array_to_center_line",
+      "parent": "docking_sensor_array_link",
+      "child": "sensor_center_line_frame",
+      "translation_m": null,
+      "rotation_rpy_rad": null,
+      "status": "survey_required",
+      "evidence_required": "beam-origin, yaw/pitch, range-zero and scale calibration for S_C"
+    },
+    {
+      "id": "sensor_array_to_c_channel_left",
+      "parent": "docking_sensor_array_link",
+      "child": "sensor_c_channel_left_frame",
+      "translation_m": null,
+      "rotation_rpy_rad": null,
+      "status": "survey_required",
+      "evidence_required": "beam-origin, yaw/pitch, range-zero and scale calibration for S_L2"
+    },
+    {
+      "id": "sensor_array_to_c_channel_right",
+      "parent": "docking_sensor_array_link",
+      "child": "sensor_c_channel_right_frame",
+      "translation_m": null,
+      "rotation_rpy_rad": null,
+      "status": "survey_required",
+      "evidence_required": "beam-origin, yaw/pitch, range-zero and scale calibration for S_R2"
+    }
+  ]
+}

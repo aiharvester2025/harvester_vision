@@ -1,0 +1,47 @@
+<?xml version="1.0"?>
+<!--
+  SIMULATION ONLY. This mirrors calibration/frames.nominal.json and contains
+  illustrative geometry only. It must never be used for clearance, motion, or
+  safety decisions. tests/test_transforms.py checks the fixed-joint origins.
+-->
+<robot name="harvester_vision_nominal">
+  <material name="rail"><color rgba="0.45 0.45 0.48 1"/></material>
+  <material name="body"><color rgba="0.15 0.32 0.70 1"/></material>
+  <material name="camera"><color rgba="0.12 0.12 0.12 1"/></material>
+  <material name="lidar"><color rgba="0.95 0.42 0.08 1"/></material>
+  <material name="sensor"><color rgba="0.10 0.70 0.30 1"/></material>
+  <material name="reference"><color rgba="0.85 0.75 0.12 0.7"/></material>
+
+  <link name="rail_frame">
+    <visual><origin xyz="2.5 0 0.05"/><geometry><box size="6.0 0.55 0.10"/></geometry><material name="rail"/></visual>
+  </link>
+  <link name="docking_reference"><visual><origin xyz="0 0 0.02"/><geometry><box size="0.10 1.20 0.04"/></geometry><material name="reference"/></visual></link>
+  <link name="cutting_reference"><visual><origin xyz="0 0 0.02"/><geometry><box size="0.10 1.20 0.04"/></geometry><material name="reference"/></visual></link>
+  <link name="base_link"><visual><origin xyz="0 0 0.35"/><geometry><box size="1.20 0.70 0.50"/></geometry><material name="body"/></visual></link>
+  <link name="docking_camera_link"><visual><geometry><box size="0.12 0.10 0.07"/></geometry><material name="camera"/></visual></link>
+  <link name="docking_camera_optical_frame"/>
+  <link name="cutting_camera_link"><visual><geometry><box size="0.12 0.10 0.07"/></geometry><material name="camera"/></visual></link>
+  <link name="cutting_camera_optical_frame"/>
+  <link name="mid360_link"><visual><origin xyz="0 0 0.04"/><geometry><cylinder radius="0.08" length="0.08"/></geometry><material name="lidar"/></visual></link>
+  <link name="docking_sensor_array_link"/>
+  <link name="sensor_diagonal_left_frame"><visual><geometry><box size="0.05 0.05 0.05"/></geometry><material name="sensor"/></visual></link>
+  <link name="sensor_diagonal_right_frame"><visual><geometry><box size="0.05 0.05 0.05"/></geometry><material name="sensor"/></visual></link>
+  <link name="sensor_center_line_frame"><visual><geometry><box size="0.05 0.05 0.05"/></geometry><material name="sensor"/></visual></link>
+  <link name="sensor_c_channel_left_frame"><visual><geometry><box size="0.05 0.05 0.05"/></geometry><material name="sensor"/></visual></link>
+  <link name="sensor_c_channel_right_frame"><visual><geometry><box size="0.05 0.05 0.05"/></geometry><material name="sensor"/></visual></link>
+
+  <joint name="rail_to_docking_reference" type="fixed"><parent link="rail_frame"/><child link="docking_reference"/><origin xyz="0 0 0" rpy="0 0 0"/></joint>
+  <joint name="rail_to_cutting_reference" type="fixed"><parent link="rail_frame"/><child link="cutting_reference"/><origin xyz="5 0 0" rpy="0 0 0"/></joint>
+  <joint name="rail_to_base_link" type="prismatic"><parent link="rail_frame"/><child link="base_link"/><origin xyz="0 0 0" rpy="0 0 0"/><axis xyz="1 0 0"/><limit lower="-0.75" upper="5.75" effort="1" velocity="0.5"/></joint>
+  <joint name="base_to_docking_camera_link" type="fixed"><parent link="base_link"/><child link="docking_camera_link"/><origin xyz="0.55 0 0.85" rpy="0 0 0"/></joint>
+  <joint name="docking_camera_link_to_optical" type="fixed"><parent link="docking_camera_link"/><child link="docking_camera_optical_frame"/><origin xyz="0 0 0" rpy="-1.5707963267948966 0 -1.5707963267948966"/></joint>
+  <joint name="base_to_cutting_camera_link" type="fixed"><parent link="base_link"/><child link="cutting_camera_link"/><origin xyz="0.8 -0.2 1" rpy="0 0 0"/></joint>
+  <joint name="cutting_camera_link_to_optical" type="fixed"><parent link="cutting_camera_link"/><child link="cutting_camera_optical_frame"/><origin xyz="0 0 0" rpy="-1.5707963267948966 0 -1.5707963267948966"/></joint>
+  <joint name="base_to_mid360_link" type="fixed"><parent link="base_link"/><child link="mid360_link"/><origin xyz="0.35 0 1.1" rpy="0 0 0"/></joint>
+  <joint name="docking_reference_to_sensor_array" type="fixed"><parent link="docking_reference"/><child link="docking_sensor_array_link"/><origin xyz="0 0 0.45" rpy="0 0 0"/></joint>
+  <joint name="sensor_array_to_diagonal_left" type="fixed"><parent link="docking_sensor_array_link"/><child link="sensor_diagonal_left_frame"/><origin xyz="0 0.28 0" rpy="0 0 -0.7853981633974483"/></joint>
+  <joint name="sensor_array_to_diagonal_right" type="fixed"><parent link="docking_sensor_array_link"/><child link="sensor_diagonal_right_frame"/><origin xyz="0 -0.28 0" rpy="0 0 0.7853981633974483"/></joint>
+  <joint name="sensor_array_to_center_line" type="fixed"><parent link="docking_sensor_array_link"/><child link="sensor_center_line_frame"/><origin xyz="0 0 0" rpy="0 0 0"/></joint>
+  <joint name="sensor_array_to_c_channel_left" type="fixed"><parent link="docking_sensor_array_link"/><child link="sensor_c_channel_left_frame"/><origin xyz="0.25 0.36 0" rpy="0 0 0"/></joint>
+  <joint name="sensor_array_to_c_channel_right" type="fixed"><parent link="docking_sensor_array_link"/><child link="sensor_c_channel_right_frame"/><origin xyz="0.25 -0.36 0" rpy="0 0 0"/></joint>
+</robot>

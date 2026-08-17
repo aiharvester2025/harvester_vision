@@ -31,18 +31,18 @@ Currently its localhost stream is paused, but its DepthAI pipeline still runs. S
 --> Also, turn on lidar when only needed (maybe during long distance pre-docking)
 --> Maybe only during pre-cutting when the robot arm stop on the rail, perform initial scanning before moving the cutting arm
 
---> Replace MJPEG with H.264/H.265 and use Jetson hardware decoding. (NEXT After LIDAR Integration)
+--> Replace MJPEG with H.264/H.265 and use Jetson hardware decoding. (Nextodo)
 
 ---->This is the largest longer-term optimization. OAK encodes H.264/H.265 efficiently, and the Orin can decode it in hardware. It can retain good 720p/15-FPS quality at a much lower bitrate and substantially reduce CPU versus cv2.imdecode() MJPEG decoding.
-Keep MJPEG quality at 60–65.  (NEXT After LIDAR Integration)
+Keep MJPEG quality at 60–65.  (Nextodo)
 
 Lowering 65 to 60 reduces bandwidth slightly with little visible difference, but it will not greatly reduce CPU—JPEG decoding cost is mainly driven by pixel count.
 For your system, use --display-fps 15 now. For LiDAR, the most valuable next code change is stopping the inactive DepthAI pipeline; 
 the best architecture upgrade is H.264/H.265 plus Jetson hardware decode.
 
 4. Synchronize time between Orin & 2 oak camera -- (DONE)
-   with lidar and PLC later. -- (We try to connect with Rasberry Pi with dummy sensor data)
-   Display sensors dummy data on the screen
+   with lidar (no rtc module and battery) and PLC later. -- (DONE)
+   Display sensors dummy data on the screen -- (DONE)
 
 5. Using pyQt5 display camera switch button (finger touch) and dummy distance sensors values widget
    - currently just use basic display control input using keyboard and mouse click

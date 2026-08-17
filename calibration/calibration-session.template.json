@@ -1,0 +1,35 @@
+{
+  "schema": "harvester.calibration-session.v1",
+  "calibration_id": "REPLACE_WITH_YYYYMMDD_site_revision",
+  "status": "planned",
+  "site_id": "REPLACE_WITH_SITE_ID",
+  "performed_at_utc": null,
+  "performed_by": null,
+  "approved_by": null,
+  "frame_registry": "calibration/frames.deployment.template.json",
+  "environment": {
+    "rail_loaded": null,
+    "ambient_temperature_c": null,
+    "notes": "Record mount changes, target/fixture IDs, and any rework. Re-run after collision, mount movement, camera replacement, or LiDAR/sensor replacement."
+  },
+  "artifacts": {
+    "docking_camera_intrinsics": null,
+    "cutting_camera_intrinsics": null,
+    "camera_lidar_extrinsics": null,
+    "docking_sensor_calibration": null,
+    "rail_localisation_calibration": null,
+    "validation_report": null
+  },
+  "acceptance": {
+    "camera_reprojection_rms_px_max": null,
+    "camera_lidar_alignment_p95_m_max": null,
+    "range_sensor_distance_error_m_max": null,
+    "rail_pose_error_m_max": null,
+    "notes": "Set site safety requirements before collecting results; no default limit is safe to assume."
+  },
+  "validity": {
+    "valid_from_utc": null,
+    "expires_at_utc": null,
+    "invalidated_by": ["sensor or camera replacement", "mount fastener movement", "collision", "rail datum movement", "firmware/calibration EEPROM change"]
+  }
+}
