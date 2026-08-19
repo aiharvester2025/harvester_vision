@@ -273,3 +273,42 @@ def validate_configuration(path: str | Path, mode: str = "planning") -> list[str
     except TransformConfigurationError as error:
         issues.append(str(error))
     return issues
+
+
+def rotation_from_quaternion(x: float, y: float, z: float, w: float) -> Matrix3:
+    """Return the rotation matrix for a quaternion in (x, y, z, w) order.
+
+    The quaternion must be normalised (unit norm); the caller is responsible
+    for the convention, since IMU and vendor SDKs disagree on axis mapping.
+    """
+    norm = math.sqrt(x * x + y * y + z * z + w * w)
+    if norm <= 0.0 or not math.isfinite(norm):
+        raise TransformConfigurationError("quaternion must have a non-zero, finite norm")
+    x, y, z, w = x / norm, y / norm, z / norm, w / norm
+    xx, yy, zz = x * x, y * y, z * z
+    xy, xz, yz = x * y, x * z, y * z
+    wx, wy, wz = w * x, w * y, w * z
+    return (
+        (1.0 - 2.0 * (yy + zz), 2.0 * (xy - wz), 2.0 * (xz + wy)),
+        (2.0 * (xy + wz), 1.0 - 2.0 * (xx + zz), 2.0 * (yz - wx)),
+        (2.0 * (xz - wy), 2.0 * (yz + wx), 1.0 - 2.0 * (xx + yy)),
+    )
+
+
+def level_points_rotation_only(
+    points: Sequence[Sequence[float]],
+    rotation: Matrix3,
+) -> list[Vector3]:
+    """Level a point cloud by applying a rotation *only* (no translation).
+
+    This is the core operation for the LiDAR HUD: the sensor stays at its own
+    origin (so it remains at the HUD centre) while static world geometry is
+    re-aligned to gravity. The caller supplies the sensor-to-world rotation so
+    this function stays independent of the orientation source (IMU, tilt
+    sensors, boom angle, or a URDF forward-kinematics result).
+    """
+    output: list[Vector3] = []
+    for point in points:
+        vector = _as_vector3(point, "point")
+        output.append(_matrix_vector(rotation, vector))
+    return output

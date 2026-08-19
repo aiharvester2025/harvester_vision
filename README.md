@@ -165,3 +165,39 @@ explicitly illustrative mount geometry and the validator rejects it for
 deployment. `calibration/frames.deployment.template.json` intentionally leaves
 all physical survey values blank until a measured, approved calibration session
 is recorded.
+
+## MID-360 LiDAR leveling and publishing (pre-implementation)
+
+The Orin will ingest the Livox MID-360 without ROS: points arrive over UDP via
+Livox-SDK2 and are republished over ZeroMQ, matching the OAK publisher pattern.
+See `mid360_publisher.py`, `lidar/leveling.py`, `lidar/livox_source.py`, and
+`plc_sensor_bridge.py`.
+
+**Leveling.** The LiDAR is arm-mounted, so raw points rotate with arm pitch/roll
+and a world-vertical tree appears to lean. Leveling re-aligns the cloud to
+gravity using orientation *only* (rotation-only, no translation), so the sensor
+stays at the HUD origin while the tree stands straight. Yaw is not required and
+is deliberately unused (IMU yaw drifts; the 2-axis tilt sensor has no yaw).
+
+Three orientation sources are supported via `--level-source`:
+- `imu`  — MID-360 built-in IMU (pitch/roll are gravity-referenced and stable).
+- `tilt` — platform 2-axis tilt sensor (via `plc_sensor_bridge.py`).
+- `boom` — boom angle sensor (via `plc_sensor_bridge.py`).
+
+The MID-360's native vendor frame differs from the project's `+X forward /
++Y left / +Z up` mechanical convention; confirm the installed vendor frame and
+convert it in `lidar/livox_source.py` before commissioning.
+
+Run offline (no hardware) to exercise the ZMQ/leveling plumbing:
+
+```bash
+python3 mid360_publisher.py --sdk-mode synthetic
+```
+
+**PLC/Modbus bridge.** `plc_sensor_bridge.py` is a skeleton that will poll the
+PLC (boom angle, 2-axis tilt, five range sensors) and republish as MessagePack
+over ZMQ. The Modbus register map must be filled from the PLC program.
+
+**H.264/H.265 + Jetson hardware decode** is the planned successor to MJPEG
+(see `todo.txt`); it is not yet implemented. Timestamps continue to follow the
+PLC-RTC UTC domain established in `time_sync.py`.
