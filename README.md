@@ -226,3 +226,19 @@ This chain matches the RViz/Gazebo URDF
 from pivot angle + extension + tilt + calibrated offsets, so a leveled cloud's
 tree height can be converted to an absolute height. See
 `calibration/README.md` for the exact offsets to survey during commissioning.
+
+## End-to-end example: tree height estimate
+
+`examples/estimate_tree_height.py` shows the full pipeline from a raw MID-360
+cloud to an absolute tree height and trunk-end height. It combines leveling
+(IMU orientation) with boom kinematics (PLC pivot/extension/tilt) and a simple
+trunk/canopy split. Run it from the repo root:
+
+```bash
+PYTHONPATH=. python3 examples/estimate_tree_height.py
+PYTHONPATH=. python3 examples/estimate_tree_height.py --pivot-deg 45 --extension-m 1.5
+PYTHONPATH=. python3 examples/estimate_tree_height.py --points my_cloud.json
+```
+
+The script is illustrative: its trunk/canopy classifier and synthetic cloud are
+placeholders to be replaced by your real segmentation once live data arrives.
