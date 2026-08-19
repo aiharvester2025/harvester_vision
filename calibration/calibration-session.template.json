@@ -20,6 +20,13 @@
     "rail_localisation_calibration": null,
     "validation_report": null
   },
+  "boom_geometry": {
+    "pivot_height_m": null,
+    "boom_stage0_length_m": null,
+    "platform_level_offset_m": null,
+    "cutting_arm_lift_offset_m": null,
+    "notes": "Surveyed offsets that turn PLC length-sensor readings (pivot angle, extension) plus platform tilt into the MID-360 height above ground. Source of truth: the kinematic URDF. cutting_arm_lift_offset_m includes the 0.30 m LiDAR mount on cutting_arm_base_link and must be held constant during a scan."
+  },
   "acceptance": {
     "camera_reprojection_rms_px_max": null,
     "camera_lidar_alignment_p95_m_max": null,

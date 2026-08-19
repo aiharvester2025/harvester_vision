@@ -201,3 +201,28 @@ over ZMQ. The Modbus register map must be filled from the PLC program.
 **H.264/H.265 + Jetson hardware decode** is the planned successor to MJPEG
 (see `todo.txt`); it is not yet implemented. Timestamps continue to follow the
 PLC-RTC UTC domain established in `time_sync.py`.
+
+## Boom kinematics: LiDAR height above ground
+
+The MID-360's height above ground is recovered from PLC length-sensor values
+using `lidar/boom_kinematics.py` (dependency-free). The measured boom degrees
+of freedom are the pivot angle and the telescopic extension (both computed in
+the PLC from length sensors) plus the 2-axis platform tilt; the unmeasured
+turret yaw, rail position, and cutting-arm lift do not affect the LiDAR's
+*vertical* datum except the cutting-arm lift, which is a calibrated constant.
+
+```text
+ground -> base_link -> [yaw: unmeasured] -> pivot angle (measured)
+       -> extension (measured) -> platform tilt (measured)
+       -> [rail: unmeasured] -> [cutting-arm lift: calibrated constant]
+       -> cutting_arm_base_link -> mid360_link (LiDAR)
+```
+
+This chain matches the RViz/Gazebo URDF
+(`oil_palm_harvester_kinematic.urdf` in `ros2_ws`), which mounts the LiDAR
+(`vehicle_lidar_link`) rigidly on `cutting_arm_base_link`.
+
+`lidar_height_above_ground(state, geometry)` returns the LiDAR's Z above ground
+from pivot angle + extension + tilt + calibrated offsets, so a leveled cloud's
+tree height can be converted to an absolute height. See
+`calibration/README.md` for the exact offsets to survey during commissioning.

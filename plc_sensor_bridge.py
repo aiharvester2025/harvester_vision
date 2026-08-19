@@ -40,14 +40,15 @@ def parse_args() -> argparse.Namespace:
 
 
 def read_orientation() -> dict:
-    """Read boom angle + 2-axis platform tilt from Modbus.
+    """Read boom pivot angle, boom extension, and 2-axis platform tilt.
 
-    TODO: replace with real Modbus reads. Registers return the boom elevation
-    angle (rad or deg?) and platform roll/pitch. The 2-axis tilt sensor has no
-    yaw, which is fine: yaw is not needed for gravity leveling.
+    TODO: replace with real Modbus reads. The PLC computes the boom pivot angle
+    and boom extension from length sensors and the 2-axis tilt sensor provides
+    platform roll/pitch. Yaw is not needed for gravity leveling.
     """
     return {
-        "boom_angle_rad": None,
+        "boom_pivot_angle_rad": None,
+        "boom_extension_m": None,
         "platform_roll_rad": None,
         "platform_pitch_rad": None,
         "valid": False,
