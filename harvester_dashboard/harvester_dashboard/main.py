@@ -76,9 +76,20 @@ def main(argv=None) -> int:
             return 3
     view.setTitle('Harvester Telemetry Dashboard')
     view.setColor('#101418')
+    # Resize the root QML Item to fill the window (not fixed 1280x800), and
+    # open at the native 1080p monitor resolution so the 1080p camera feed is
+    # displayed at full resolution instead of being downscaled.
+    view.setResizeMode(QQuickView.SizeRootObjectToView)
+    view.resize(1920, 1080)
     view.show()
 
     source.start()
+
+    # Periodically release freed-but-unreturned heap memory back to the OS.
+    # The decoder allocates/frees 6 MB numpy buffers continuously; glibc keeps
+    # that memory in mmap'd arenas (raising steady-state RSS) unless trimmed.
+    # ``malloc_trim`` returns the top-of-heap free span to the kernel.
+    _install_memory_trim_timer(app)
 
     signal.signal(signal.SIGINT, signal.SIG_DFL)
     code = app.exec_()
@@ -88,6 +99,33 @@ def main(argv=None) -> int:
         bridge.status_client.close()
     annotation_publisher.close()
     return code
+
+
+def _install_memory_trim_timer(app) -> None:
+    """Run a periodic gc + malloc_trim to keep the dashboard RSS bounded."""
+    import gc
+    from PySide2.QtCore import QTimer
+
+    try:
+        import ctypes
+        _libc = ctypes.CDLL('libc.so.6', use_errno=True)
+        _malloc_trim = _libc.malloc_trim
+        _malloc_trim.argtypes = [ctypes.c_size_t]
+        _malloc_trim.restype = ctypes.c_int
+    except Exception:
+        _malloc_trim = None
+
+    def _trim():
+        gc.collect()
+        if _malloc_trim is not None:
+            try:
+                _malloc_trim(0)
+            except Exception:
+                pass
+
+    timer = QTimer(app)
+    timer.timeout.connect(_trim)
+    timer.start(15_000)  # every 15 s
 
 
 def _make_frame_sink(bridge, provider):

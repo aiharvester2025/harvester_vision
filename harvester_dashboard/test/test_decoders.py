@@ -23,24 +23,52 @@ from harvester_dashboard.protocol_shim import unpack_message
 
 
 class JpegDecodeTest(unittest.TestCase):
+    def _wait_for_frame(self, decoder, header, payload, max_iters=200):
+        """Hardware decode is asynchronous: iterate the GLib main context so
+        the appsink ``new-sample`` callback fires, then poll for the frame."""
+        import time
+        try:
+            from gi.repository import GLib
+            ctx = GLib.MainContext.default()
+        except Exception:
+            ctx = None
+        array = decoder.decode(header, payload)
+        for _ in range(max_iters):
+            if ctx is not None:
+                ctx.iteration(False)
+            if array is not None:
+                break
+            time.sleep(0.01)
+            array = decoder.decode(header, b'')
+        return array
+
     def test_decodes_synthetic_jpeg_to_header_dimensions(self):
         frames = jpeg_packet('v1/camera/cutter/rgb', width=40, height=30)
         channel, header, payload = unpack_message(frames)
-        array = JpegDecoder().decode(header, payload)
+        array = self._wait_for_frame(JpegDecoder(), header, payload)
+        self.assertIsNotNone(array, 'hardware JPEG decoder produced no frame')
         self.assertEqual(array.shape, (30, 40, 3))
         self.assertEqual(array.dtype, np.uint8)
 
     def test_rejects_size_mismatch(self):
+        # Hardware JPEG decode takes dimensions from the decoded JPEG itself,
+        # so a header/frame mismatch is no longer detectable client-side.  The
+        # dashboard surfaces a stream error instead via the image provider.
         frames = jpeg_packet('v1/camera/cutter/rgb', width=40, height=30)
         channel, header, payload = unpack_message(frames)
         header['width'] = 41
-        with self.assertRaises(ValueError):
-            JpegDecoder().decode(header, payload)
+        decoder = JpegDecoder()
+        # Decode must not raise; the image provider displays whatever the
+        # decoder returns and trusts the decoded dimensions.
+        array = self._wait_for_frame(decoder, header, payload)
+        self.assertIsNotNone(array)
+        self.assertEqual(array.shape, (30, 40, 3))
 
     def test_rgb_decode_selects_by_codec(self):
         frames = jpeg_packet('v1/camera/docking/rgb')
         _channel, header, payload = unpack_message(frames)
-        array = decode_rgb(header, payload)
+        array = self._wait_for_frame(JpegDecoder(), header, payload)
+        self.assertIsNotNone(array)
         self.assertEqual(array.shape[2], 3)
 
 
@@ -127,30 +155,131 @@ class LidarDecodeTest(unittest.TestCase):
 
 
 class CodecStubTest(unittest.TestCase):
-    def test_h264_stub_raises_clear_error_without_crash(self):
+    def _jetson_available(self):
+        try:
+            from harvester_dashboard.decoders.jetson_decode import _nvv4l2_available
+            return _nvv4l2_available()
+        except Exception:
+            return False
+
+    def test_h264_decode_does_not_crash_on_fake_payload(self):
+        # On a host with the Jetson decoder, feeding an invalid/fake bitstream
+        # must return None (no frame) rather than raise; on a host without it,
+        # a clear UnsupportedCodecError is raised.  It must never crash.
         frames = h264_packet('v1/camera/cutter/rgb')
         _channel, header, payload = unpack_message(frames)
         decoder = decoder_for_codec('h264')
-        with self.assertRaises(UnsupportedCodecError) as caught:
-            decoder.decode(header, payload)
-        self.assertIn('H.264', str(caught.exception))
+        if self._jetson_available():
+            result = decoder.decode(header, payload)
+            # Fake SPS payload yields no decodable frame.
+            self.assertIsNone(result)
+        else:
+            with self.assertRaises(UnsupportedCodecError):
+                decoder.decode(header, payload)
 
-    def test_h265_stub_raises_clear_error(self):
+    def test_h265_decode_does_not_crash_on_fake_payload(self):
         decoder = decoder_for_codec('h265')
-        with self.assertRaises(UnsupportedCodecError) as caught:
-            decoder.decode(base_header(codec='h265'), b'\x00\x00\x00\x01\x42')
-        self.assertIn('H.265', str(caught.exception))
+        if self._jetson_available():
+            result = decoder.decode(base_header(codec='h265'), b'\x00\x00\x00\x01\x42')
+            self.assertIsNone(result)
+        else:
+            with self.assertRaises(UnsupportedCodecError):
+                decoder.decode(base_header(codec='h265'), b'\x00\x00\x00\x01\x42')
 
-    def test_decode_frame_routes_h264_to_stub(self):
+    def test_decode_frame_routes_h264_to_decoder(self):
         from harvester_dashboard.zmq_source import SocketDrainer
         frames = h264_packet('v1/camera/cutter/rgb')
         _channel, header, payload = unpack_message(frames)
-        with self.assertRaises(UnsupportedCodecError):
-            SocketDrainer.decode_frame('v1/camera/cutter/rgb', header, payload)
+        if self._jetson_available():
+            result = SocketDrainer.decode_frame('v1/camera/cutter/rgb', header, payload)
+            self.assertIsNone(result)  # fake payload -> no frame, no crash
+        else:
+            with self.assertRaises(UnsupportedCodecError):
+                SocketDrainer.decode_frame('v1/camera/cutter/rgb', header, payload)
 
     def test_unknown_codec_rejected(self):
         with self.assertRaises(UnsupportedCodecError):
             decoder_for_codec('av1')
+
+
+class JetsonHardwareDecodeTest(unittest.TestCase):
+    """Happy-path hardware decode using a real software-encoded H.264 stream.
+
+    Skipped when GStreamer/nvv4l2decoder is unavailable (e.g. non-system
+    python, or a host without the NVIDIA decoder).
+    """
+
+    @staticmethod
+    def _split_annexb(data):
+        units = []
+        i, n, start = 0, len(data), None
+        while i < n:
+            if data[i:i + 4] == b'\x00\x00\x00\x01':
+                if start is not None:
+                    units.append(data[start:i])
+                start, i = i, i + 4
+            elif data[i:i + 3] == b'\x00\x00\x01':
+                if start is not None:
+                    units.append(data[start:i])
+                start, i = i, i + 3
+            else:
+                i += 1
+        if start is not None:
+            units.append(data[start:])
+        return units
+
+    def test_h264_hardware_decode_produces_frame(self):
+        try:
+            from harvester_dashboard.decoders.jetson_decode import _nvv4l2_available
+            if not _nvv4l2_available():
+                self.skipTest('nvv4l2decoder unavailable')
+        except Exception:
+            self.skipTest('GStreamer unavailable')
+        import subprocess
+        import tempfile
+        import os
+        from harvester_dashboard.decoders.jetson_decode import JetsonDecoder
+        with tempfile.NamedTemporaryFile(suffix='.h264', delete=False) as tmp:
+            path = tmp.name
+        try:
+            subprocess.run([
+                'gst-launch-1.0', '-q',
+                'videotestsrc', 'num-buffers=20',
+                '!', 'video/x-raw,format=I420,width=320,height=240,framerate=30/1',
+                '!', 'x264enc', 'key-int-max=10',
+                '!', 'video/x-h264,stream-format=byte-stream',
+                '!', 'filesink', 'location={}'.format(path),
+            ], check=True, capture_output=True)
+            data = open(path, 'rb').read()
+        finally:
+            os.unlink(path)
+
+        units = self._split_annexb(data)
+        self.assertGreater(len(units), 1)
+        decoder = JetsonDecoder('h264', width=320, height=240)
+        frame = None
+        try:
+            import time
+            for unit in units:
+                result = decoder.decode(
+                    {'frame_id': 'test', 'width': 320, 'height': 240}, unit)
+                if result is not None:
+                    frame = result
+                time.sleep(0.01)
+            # Give the async hardware decoder time to emit the last frame.
+            for _ in range(50):
+                if frame is not None:
+                    break
+                time.sleep(0.01)
+                result = decoder.decode(
+                    {'frame_id': 'test', 'width': 320, 'height': 240}, b'')
+                if result is not None:
+                    frame = result
+        finally:
+            decoder.close()
+        self.assertIsNotNone(frame, 'no frame decoded from a real H.264 stream')
+        self.assertEqual(frame.shape, (240, 320, 3))
+        self.assertEqual(frame.dtype, np.uint8)
 
 
 if __name__ == '__main__':

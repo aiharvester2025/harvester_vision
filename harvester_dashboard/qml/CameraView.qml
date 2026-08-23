@@ -20,7 +20,7 @@ Item {
         fillMode: Image.PreserveAspectFit
         asynchronous: false
         cache: false
-        smooth: false
+        smooth: true
     }
 
     // The image is letterboxed; compute the displayed rect so the click

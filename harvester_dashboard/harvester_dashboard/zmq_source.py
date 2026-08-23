@@ -92,20 +92,36 @@ class SocketDrainer:
         if self.on_packet is not None:
             self.on_packet(channel, header, payload, parsed)
 
+    # Stateful decoders (H.264/H.265) are cached per (codec, frame_id) so a
+    # decode session persists across the access units of one stream.  JPEG,
+    # depth, and LiDAR decoders are stateless and created fresh each call.
+    _stateful_decoders: dict = {}
+
+    @staticmethod
+    def _stateful_decoder(codec: str, frame_id: str):
+        key = (codec, frame_id)
+        decoder = SocketDrainer._stateful_decoders.get(key)
+        if decoder is None:
+            decoder = decoders.decoder_for_codec(codec)
+            SocketDrainer._stateful_decoders[key] = decoder
+        return decoder
+
     @staticmethod
     def decode_frame(channel: str, header: dict, payload: bytes):
         """Decode image/depth/lidar payloads; ``None`` for JSON channels.
 
-        Raises :class:`UnsupportedCodecError` for h264/h265 so callers
-        surface a stream error instead of crashing.
+        Raises :class:`UnsupportedCodecError` for h264/h265 when the Jetson
+        decoder is unavailable so callers surface a stream error instead of
+        crashing.
         """
         if channel.endswith('/rgb'):
             codec = header.get('codec')
-            if codec == 'jpeg':
-                return decoders.JpegDecoder().decode(header, payload)
-            if codec in ('h264', 'h265'):
-                # Explicit stub selection with a precise message.
-                decoder = decoders.decoder_for_codec(codec)
+            if codec in ('jpeg', 'h264', 'h265'):
+                # Stateful hardware decode (jpeg: JetsonJpegDecoder cached
+                # per frame_id; h264/h265: JetsonDecoder).  A fresh decoder
+                # per call would lose the async-decode-in-flight frame.
+                decoder = SocketDrainer._stateful_decoder(
+                    codec, header.get('frame_id', ''))
                 return decoder.decode(header, payload)
             raise UnsupportedCodecError(
                 'unknown rgb codec {!r}'.format(codec))

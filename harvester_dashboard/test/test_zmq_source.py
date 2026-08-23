@@ -83,9 +83,29 @@ class InprocPubSubTest(unittest.TestCase):
 
     def test_decode_frame_decodes_jpeg(self):
         from harvester_dashboard.zmq_source import SocketDrainer as SD
+        # Clear any cached JPEG session from earlier tests in this run so the
+        # first push-buffer in this test sees a fresh pipeline.
+        SD._stateful_decoders.pop(('jpeg', 'test_frame'), None)
         frames = jpeg_packet('v1/camera/cutter/rgb', width=16, height=12)
         _c, header, payload = unpack_message(frames)
+        # Hardware JPEG decode is asynchronous and needs the GLib main context
+        # to iterate so the appsink new-sample callback fires.  In the live
+        # dashboard Qt drives this loop; in unit tests we iterate manually.
+        import time
+        try:
+            from gi.repository import GLib
+            ctx = GLib.MainContext.default()
+        except Exception:
+            ctx = None
         array = SD.decode_frame('v1/camera/cutter/rgb', header, payload)
+        for _ in range(2000):
+            if ctx is not None:
+                ctx.iteration(False)
+            if array is not None:
+                break
+            time.sleep(0.001)
+            array = SD.decode_frame('v1/camera/cutter/rgb', header, b'')
+        self.assertIsNotNone(array)
         self.assertEqual(array.shape, (12, 16, 3))
 
     def test_decode_frame_returns_none_for_json(self):

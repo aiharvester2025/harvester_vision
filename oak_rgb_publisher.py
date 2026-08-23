@@ -49,6 +49,14 @@ def main():
     parser.add_argument('--height', type=int, default=720, help='Video height in pixels')
     parser.add_argument('--fps', type=float, default=15.0)
     parser.add_argument('--quality', type=int, default=65, help='MJPEG quality (1-100)')
+    parser.add_argument('--ev-compensation', type=int, default=7,
+                        help='auto-exposure EV compensation (-9..+9, positive = brighter)')
+    parser.add_argument('--brightness', type=int, default=0,
+                        help='ISP brightness offset (-10..10, positive = brighter; 0 = default)')
+    parser.add_argument('--contrast', type=int, default=0,
+                        help='ISP contrast offset (-10..10; 0 = default)')
+    parser.add_argument('--max-exposure-us', type=int, default=0,
+                        help='max auto-exposure time in microseconds (0 = sensor default; lower to cap for motion sharpness)')
     parser.add_argument('--disabled', action='store_true')
     args = parser.parse_args()
     if args.width <= 0 or args.height <= 0:
@@ -101,6 +109,24 @@ def main():
         cam.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
         cam.setVideoSize(args.width, args.height)
         cam.setFps(args.fps)
+
+        # Brighten dark interiors: enable auto-exposure and add positive EV
+        # compensation so a bright window doesn't drag the scene down.  Do
+        # NOT cap the max exposure time unless the operator wants to — the
+        # sensor default lets auto-exposure collect enough light in a dark
+        # room, while a frame-time cap leaves the scene near-black.  The
+        # --brightness and --contrast flags can add an additional ISP
+        # brightness/contrast lift (use 0 to leave the ISP alone).
+        control = cam.initialControl
+        control.setAutoExposureEnable()
+        if args.ev_compensation != 0:
+            control.setAutoExposureCompensation(args.ev_compensation)
+        if args.brightness != 0:
+            control.setBrightness(args.brightness)
+        if args.contrast != 0:
+            control.setContrast(args.contrast)
+        if args.max_exposure_us > 0:
+            control.setAutoExposureLimit(args.max_exposure_us)
 
         encoder = pipeline.create(dai.node.VideoEncoder)
         encoder.setDefaultProfilePreset(args.fps, dai.VideoEncoderProperties.Profile.MJPEG)
