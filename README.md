@@ -198,9 +198,11 @@ python3 mid360_publisher.py --sdk-mode synthetic
 PLC (boom angle, 2-axis tilt, five range sensors) and republish as MessagePack
 over ZMQ. The Modbus register map must be filled from the PLC program.
 
-**H.264/H.265 + Jetson hardware decode** is the planned successor to MJPEG
-(see `todo.txt`); it is not yet implemented. Timestamps continue to follow the
-PLC-RTC UTC domain established in `time_sync.py`.
+**H.264/H.265 + Jetson hardware decode** is the successor to MJPEG (see
+`todo.txt`). The OAK cameras encode H.264/H.265 (or MJPEG via `--codec jpeg`),
+and the Orin decodes in hardware (`nvv4l2decoder` for H.264/H.265,
+`nvjpegdec` for JPEG) in `harvester_dashboard/.../decoders/`. Timestamps
+continue to follow the PLC-RTC UTC domain established in `time_sync.py`.
 
 ## Boom kinematics: LiDAR height above ground
 

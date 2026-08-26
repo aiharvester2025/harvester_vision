@@ -114,3 +114,43 @@ canonical `5590` themselves:
 
 Safety boundary (unchanged): observation-only. The aggregator never emits a
 joint, velocity, PLC, solenoid, or motion command; its REP is read-only.
+
+## Codec decode notes (JPEG slow-motion fix)
+
+The dashboard decodes RGB payloads by the header `codec` field, never by camera
+identity. H.264/H.265 use the stateful `nvv4l2decoder` path
+(`decoders/jetson_decode.py`); JPEG uses the `nvjpegdec` path
+(`decoders/jetson_jpeg.py`). All three fall back to a clear error when the
+Jetson hardware decoder is unavailable, never a crash.
+
+**JPEG live-view was slow (human motion lagged).** The JPEG path originally
+decoded *synchronously*: `JetsonJpegSession.decode()` pushed each JPEG and then
+blocked on `appsink try-pull-sample` (up to 300 ms) waiting for that frame to
+decode (~65–125 ms per frame of NVMM conversion + GPU `nvvidconv` + memory
+copy). Because the drain worker is single-threaded, this serialized decode
+stalled the loop, backed up the ZMQ `RCVHWM` buffer, dropped frames, and
+accumulated latency — so live motion looked like slow motion even though each
+individual frame was correct (no green screen, good quality). H.265 did not
+show this because it decodes *asynchronously*: `decode()` pushes a buffer and
+immediately returns the newest frame already cached by the `appsink
+new-sample` signal.
+
+**Fix (in `jetson_jpeg.py`).** The JPEG path now mirrors the H.264/H.265 async
+model:
+
+- `decode()` pushes the self-contained JPEG and returns `_latest_rgb`
+  immediately (non-blocking), instead of waiting on `try-pull-sample`.
+- Decoded frames arrive via the `appsink new-sample` signal handler
+  (`_on_new_sample`), which does **not** require a running GLib main loop —
+  GStreamer dispatches it synchronously from the streaming thread, exactly as
+  the working H.264/H.265 decoder already does.
+- The redundant `jpegparse` element was removed: `nvjpegdec` consumes
+  `image/jpeg` directly.
+- appsrc streaming flags changed from `is-live=true do-timestamp=true` to
+  `is-live=false do-timestamp=false`. `is-live=true` made GStreamer apply
+  live-latency/dropping logic that fought a stateless per-frame JPEG feed;
+  `is-live=false` lets each self-contained JPEG flow straight through.
+
+The `nvvidconv` RGBA conversion, the NVDEC green-concealment guard
+(`_is_green_concealment`), and the per-`frame_id` pipeline reuse are all
+unchanged.

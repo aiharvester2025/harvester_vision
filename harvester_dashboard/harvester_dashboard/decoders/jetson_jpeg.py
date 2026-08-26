@@ -9,6 +9,11 @@ session is stateless per-call — unlike the stateful H.264/H.265 sessions in
 ``JetsonDecoder``.  We still keep a small per-frame-id cache so the GStreamer
 pipeline is reused across frames of the same camera (creating + tearing down a
 GStreamer pipeline per JPEG frame would add noticeable latency).
+
+Decode is asynchronous and mirrors ``JetsonDecoder``: ``decode()`` pushes the
+JPEG and returns the latest frame already decoded by the ``new-sample`` signal,
+never blocking the drain thread.  (The earlier synchronous ``try-pull-sample``
+approach blocked ~65-125 ms per frame and made live motion appear slow.)
 """
 
 from __future__ import annotations
@@ -67,11 +72,11 @@ class JetsonJpegSession:
         self._pipeline = self._build_pipeline()
 
     def _build_pipeline(self):
-        # JPEG goes: appsrc (raw JPEG bytes) -> jpegparse -> nvjpegdec (hw) ->
-        # nvvidconv (GPU) -> RGBA -> appsink.  ``nvjpegdec`` outputs frames in
-        # NVIDIA NVMM (GPU) memory, which the CPU ``videoconvert`` element
-        # mangles into a dark image.  The H.264/H.265 path already uses the
-        # GPU ``nvvidconv`` converter (RGBA output) and produces correct
+        # JPEG goes: appsrc (raw JPEG bytes) -> nvjpegdec (hw) -> nvvidconv
+        # (GPU) -> RGBA -> appsink.  ``nvjpegdec`` outputs frames in NVIDIA
+        # NVMM (GPU) memory, which the CPU ``videoconvert`` element mangles
+        # into a dark image.  The H.264/H.265 path already uses the GPU
+        # ``nvvidconv`` converter (RGBA output) and produces correct
         # brightness, so mirror that here.
         if Gst.ElementFactory.find('nvvidconv') is not None:
             convert = 'nvvidconv'
@@ -85,21 +90,29 @@ class JetsonJpegSession:
         # like a dark/stale picture on the dashboard.  This property can
         # only be set while the element is in NULL or READY state, so it is
         # baked into the launch description here.
-        # ``emit-signals=false``: we poll ``try-pull-sample`` from the caller
-        # thread instead of relying on the ``new-sample`` signal.  The signal
-        # requires a running GLib main loop, which the dashboard's Qt worker
-        # thread does not own — iterating it there only burns a full CPU core
-        # in a busy-wait.  Polling the appsink is synchronous, main-loop-free,
-        # and blocks efficiently inside GStreamer.
+        #
+        # Decode is asynchronous, mirroring the H.264/H.265 path: we push each
+        # self-contained JPEG and receive decoded frames via the ``new-sample``
+        # signal, returning the latest cached frame without ever blocking the
+        # caller.  Blocking on ``try-pull-sample`` per frame serialized decode
+        # (~65-125 ms/frame) and stalled the single drain thread, which is why
+        # live JPEG motion appeared slow compared to H.265.  The ``new-sample``
+        # signal does NOT require a running GLib main loop: GStreamer dispatches
+        # it synchronously from the streaming thread, exactly as the working
+        # H.264/H.265 decoder already relies on.
         description = (
-            'appsrc name=src is-live=true do-timestamp=true format=time '
-            'caps=image/jpeg ! jpegparse ! nvjpegdec mjpegdecode=true ! {} ! '
+            'appsrc name=src is-live=false do-timestamp=false format=time '
+            'caps=image/jpeg ! nvjpegdec mjpegdecode=true ! {} ! '
             'video/x-raw,format={} ! appsink name=sink sync=false '
-            'max-buffers=2 drop=true emit-signals=false'.format(
+            'max-buffers=2 drop=true emit-signals=true'.format(
                 convert, self._output_format))
         pipeline = Gst.parse_launch(description)
         self._appsrc = pipeline.get_by_name('src')
         self._appsink = pipeline.get_by_name('sink')
+        # Receive decoded frames via the "new-sample" signal instead of
+        # polling, which is the reliable low-latency path for a live stream
+        # and mirrors JetsonDecoder._on_new_sample.
+        self._appsink.connect('new-sample', self._on_new_sample)
         pipeline.set_state(Gst.State.PLAYING)
         return pipeline
 
@@ -135,11 +148,18 @@ class JetsonJpegSession:
         finally:
             buf.unmap(mapinfo)
 
-    def _accept_sample(self, sample):
-        """Store the sample if it is not the NVDEC green concealment frame."""
+    def _on_new_sample(self, appsink):
+        """``new-sample`` signal handler: cache the latest decoded frame.
+
+        Runs on GStreamer's streaming thread (synchronously from the pipeline,
+        no GLib main loop required).  Mirrors ``JetsonDecoder._on_new_sample``.
+        """
+        sample = appsink.emit('pull-sample')
+        if sample is None:
+            return Gst.FlowReturn.OK
         rgb = self._sample_to_rgb(sample)
         if rgb is None:
-            return
+            return Gst.FlowReturn.OK
         # NVDEC MJPEG concealment bug: ``nvjpegdec mjpegdecode=true``
         # periodically emits a uniform pure-green frame (R=0, G=147, B=0)
         # instead of the decoded image — roughly one frame in four.  The input
@@ -152,6 +172,7 @@ class JetsonJpegSession:
         # the per-frame allocation churn that fragments the process heap.
         if not self._is_green_concealment(rgb):
             self._latest_rgb = rgb
+        return Gst.FlowReturn.OK
 
     @staticmethod
     def _is_green_concealment(rgb: np.ndarray) -> bool:
@@ -190,17 +211,12 @@ class JetsonJpegSession:
                 self.height = int(header.get('height', 0)) or None
             buffer = Gst.Buffer.new_wrapped(payload)
             self._appsrc.emit('push-buffer', buffer)
-            # Poll the appsink directly for the freshly-decoded frame.  This
-            # blocks (efficiently) inside GStreamer until a frame is ready or
-            # the timeout elapses — no GLib main-loop iteration, no busy-wait,
-            # so the Qt worker thread does not spin a CPU core.
-            #
-            # Hardware JPEG decode here takes ~65-125 ms end-to-end (NVMM
-            # conversion + GPU nvvidconv + memory copy); the timeout only
-            # bounds the worst case (pipeline hiccup / dropped frame).
-            sample = self._appsink.emit('try-pull-sample', 300 * 1000 * 1000)
-            if sample is not None:
-                self._accept_sample(sample)
+            # Non-blocking: push the self-contained JPEG and return the newest
+            # decoded frame already cached by the ``new-sample`` signal.  This
+            # mirrors the H.264/H.265 path and keeps the single drain thread
+            # running at the camera's native fps instead of stalling on a
+            # synchronous ~65-125 ms hardware decode per frame (which made live
+            # JPEG motion appear slow).
             return self._latest_rgb
 
     def close(self):
