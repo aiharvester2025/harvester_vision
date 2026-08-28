@@ -26,6 +26,8 @@ JSON_CHANNELS = frozenset({
     'v1/system/status',
     'v1/camera/cutter/camera_info',
     'v1/camera/docking/camera_info',
+    'v1/camera/cutter/imu',
+    'v1/camera/docking/imu',
     'v1/operator/target_selection',
 })
 

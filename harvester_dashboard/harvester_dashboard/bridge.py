@@ -10,8 +10,11 @@ endpoint is defined).
 
 from __future__ import annotations
 
+import math
 import time
 from typing import Any, Dict, List, Optional
+
+import numpy as np
 
 try:
     from PySide2.QtCore import Property, QObject, QTimer, Signal, Slot
@@ -46,6 +49,10 @@ if _QT_AVAILABLE:
         maintenance_changed = Signal()
         lidar_points_changed = Signal()
         lidar_view_changed = Signal()
+        pointcloud_visible_changed = Signal()
+        pointcloud_changed = Signal()
+        imu_active_changed = Signal()
+        imu_enabled_changed = Signal()
         frame_tick = Signal()
 
         STATUS_TIMEOUT_MS = 600
@@ -66,8 +73,17 @@ if _QT_AVAILABLE:
             self._hud_visible = True
             self._lidar_visible = True
             self._lidar_view_index = 0
+            self._pointcloud_visible = True
+            self._imu_enabled = True
+            self._imu_reference = {'cutter': None, 'docking': None}
+            self._imu_attitude = {'cutter': None, 'docking': None}
             self._frame_counters = {'cutter': 0, 'docking': 0}
             self._depth_counters = {'cutter': 0, 'docking': 0}
+            self._pointcloud_cache = None
+            # Raw (unstabilized) unprojected cloud, cached per camera so an IMU
+            # update re-applies only the cheap rotation instead of re-running
+            # the ~3.3 ms depth unprojection on the UI thread.
+            self._raw_cloud_cache: Dict[str, Any] = {}
             self._latest_frames: Dict[str, Any] = {}
             self._toast = ''
             self._toast_until = 0.0
@@ -90,6 +106,10 @@ if _QT_AVAILABLE:
         def set_view(self, view: str) -> None:
             if view in ('cutter', 'docking') and view != self._view:
                 self._view = view
+                # The flattened cloud cache is for the *previous* camera; drop
+                # it so the inset re-reads the new camera's cloud immediately
+                # (the raw unprojection cache is keyed by camera, so it is fine).
+                self._invalidate_pointcloud_cache()
                 self.view_changed.emit()
 
         def _get_view(self) -> str:
@@ -110,6 +130,25 @@ if _QT_AVAILABLE:
 
         def _get_lidar_visible(self) -> bool:
             return self._lidar_visible
+
+        @Slot()
+        def toggle_pointcloud(self) -> None:
+            self._pointcloud_visible = not self._pointcloud_visible
+            self.pointcloud_visible_changed.emit()
+
+        def _get_pointcloud_visible(self) -> bool:
+            return self._pointcloud_visible
+
+        @Slot()
+        def toggle_imu(self) -> None:
+            """Toggle IMU vibration stabilization (render-only A/B)."""
+            self._imu_enabled = not self._imu_enabled
+            self._invalidate_pointcloud_cache()
+            self.imu_enabled_changed.emit()
+            self.pointcloud_changed.emit()
+
+        def _get_imu_enabled(self) -> bool:
+            return self._imu_enabled
 
         # =================================================================
         # LiDAR view cycling — render-only, cycles on key 5.
@@ -146,11 +185,79 @@ if _QT_AVAILABLE:
             elif channel.endswith('/depth'):
                 camera = 'cutter' if '/cutter/' in channel else 'docking'
                 self._depth_counters[camera] += 1
+                # Only refresh the point cloud when it is actually visible:
+                # unprojecting a 960x540 depth map per depth frame (even at a
+                # throttled 5 Hz x 2 cameras) wastes CPU/memory and contributed
+                # to the dashboard OOM when the operator was not viewing it.
+                if self._pointcloud_visible and camera == self._view:
+                    self._invalidate_raw_cloud_cache(camera)
+                    self._invalidate_pointcloud_cache()
+                    self.pointcloud_changed.emit()
             elif channel == 'v1/lidar/raw':
                 self._set_lidar_points(decoded)
             self.frame_tick.emit()
 
+        def on_json_packet(self, channel: str, header, decoded) -> None:
+            """UI-thread hook for JSON channels (wired to ``model.on_json``).
+
+            The model invokes ``on_json(channel, header, decoded)``, so the
+            ``header`` argument is required even though only ``decoded`` is
+            consumed here.  The IMU stream is JSON and never reaches
+            ``on_frame_decoded`` (which only carries decoded image/depth/lidar
+            frames), so IMU arrivals are handled here.
+            """
+            if channel.endswith('/imu'):
+                self._on_imu(channel, decoded)
+
+        def _on_imu(self, channel: str, decoded) -> None:
+            """Record the latest IMU attitude and refresh the active cloud."""
+            camera = 'cutter' if '/cutter/' in channel else 'docking'
+            # Drop the inactive camera's IMU entirely: only the active camera's
+            # cloud is stabilized, so there is no reason to track the inactive
+            # camera's attitude (its reference is re-latched on the first
+            # active sample after a view switch).
+            if camera != self._view:
+                return
+            if not isinstance(decoded, dict):
+                return
+            attitude = decoded.get('attitude_rpy_rad')
+            if not isinstance(attitude, (list, tuple)) or len(attitude) < 2:
+                return
+            try:
+                roll = float(attitude[0])
+                pitch = float(attitude[1])
+            except (TypeError, ValueError, OverflowError):
+                # Malformed/non-numeric attitude: treat as "no attitude".
+                return
+            if not (math.isfinite(roll) and math.isfinite(pitch)):
+                return
+            new_attitude = (roll, pitch)
+            previous = self._imu_attitude.get(camera)
+            if previous is not None:
+                # Only refresh when the attitude actually moved.  IMU is now
+                # published at the same ~5 Hz as depth, and each refresh only
+                # re-applies the cheap rotation + flatten (depth unprojection is
+                # cached), so this epsilon gate still avoids redundant flatten
+                # work when the attitude is quiescent.
+                delta = abs(roll - previous[0]) + abs(pitch - previous[1])
+                if delta < self._IMU_ATTITUDE_EPSILON:
+                    return
+            self._imu_attitude[camera] = new_attitude
+            # Latch the reference attitude on first sample so stabilization
+            # removes vibration *relative to* the current (possibly tilted)
+            # resting pose, not to absolute gravity-down.
+            if self._imu_reference.get(camera) is None:
+                self._imu_reference[camera] = new_attitude
+            self.imu_active_changed.emit()
+            if self._pointcloud_visible:
+                self._invalidate_pointcloud_cache()
+                self.pointcloud_changed.emit()
+
         _LIDAR_HUD_SIZE_M = 8.0  # mirror of LidarInset.qml range_limit_m
+
+        # Minimum attitude change (rad, summed |droll|+|dpitch|) that triggers
+        # a point-cloud recompute.  IMU is published at ~5 Hz (matching depth).
+        _IMU_ATTITUDE_EPSILON = 1e-3
 
         def _set_lidar_points(self, points) -> None:
             try:
@@ -191,8 +298,141 @@ if _QT_AVAILABLE:
                 'v1/camera/{}/depth'.format(camera))
 
         # =================================================================
+        # Camera-relative point cloud (UI-only, derived from depth + rgb +
+        # camera_info).  No new wire channel; unprojection happens here.
+        # =================================================================
+        def latest_pointcloud(self, camera: str):
+            """Back-project the latest depth into a camera-frame cloud.
+
+            Returns ``{'points': Nx3, 'colors': Nx3}`` (empty when depth or
+            intrinsics are unavailable).  Capped to ``pointcloud_max_points``.
+            The depth unprojection is cached in ``_raw_cloud_cache`` (keyed by
+            camera) so an IMU update re-applies only the cheap rotation instead
+            of re-running the ~3.3 ms unprojection on the UI thread.
+            """
+            raw = self._raw_cloud_cache.get(camera)
+            if raw is None:
+                from .decoders.pointcloud import unproject_depth
+                depth = self.latest_depth(camera)
+                rgb = self.latest_rgb(camera)
+                camera_info = self.model.snapshot_camera_info(camera)
+                # Pass the RGB delivered size so colour is sampled at the
+                # correct RGB pixel when depth is delivered at a different
+                # resolution.
+                rgb_header = self.model.state(
+                    'v1/camera/{}/rgb'.format(camera)).last_header
+                rgb_w = (rgb_header or {}).get('width')
+                rgb_h = (rgb_header or {}).get('height')
+                raw = unproject_depth(
+                    depth, rgb, camera_info,
+                    max_points=self.config.pointcloud_max_points,
+                    rgb_width=rgb_w, rgb_height=rgb_h)
+                self._raw_cloud_cache[camera] = raw
+            if not self._imu_enabled:
+                return raw
+            return self._stabilize_cloud(camera, raw)
+
+        def _stabilize_cloud(self, camera: str, cloud):
+            """Apply IMU vibration compensation to a point cloud dict."""
+            if not isinstance(cloud, dict):
+                return cloud
+            points = cloud.get('points')
+            if points is None or len(points) == 0:
+                return cloud
+            attitude = self._imu_attitude.get(camera)
+            reference = self._imu_reference.get(camera)
+            if attitude is None or reference is None:
+                return cloud
+            from .decoders.imustab import stabilize_points
+            return {'points': stabilize_points(points, attitude, reference),
+                    'colors': cloud.get('colors')}
+
+        def _get_camera_pointcloud(self):
+            """Flatten the active camera's cloud to ``[x,y,z,r,g,b, ...]``.
+
+            Cached: the flattened list is rebuilt only when the underlying
+            depth or IMU attitude changes (``pointcloud_changed``), not on
+            every QML property read.
+            """
+            if getattr(self, '_pointcloud_cache', None) is not None:
+                return self._pointcloud_cache
+            camera = self._view
+            cloud = self.latest_pointcloud(camera)
+            points = cloud.get('points') if isinstance(cloud, dict) else None
+            colors = cloud.get('colors') if isinstance(cloud, dict) else None
+            if points is None or len(points) == 0:
+                self._pointcloud_cache = []
+                return self._pointcloud_cache
+            if colors is None or len(colors) != len(points):
+                colors = np.zeros((len(points), 3), dtype=np.uint8)
+            # Vectorized flatten: build one Nx6 float32 array (xyz + rgb) and
+            # call ``.tolist()`` once.  The old ``zip(points.tolist(),
+            # colors.tolist())`` + per-element ``int()`` loop was ~3x slower and
+            # ran on the UI thread per recompute.  Color channels are stored as
+            # float32 here (0-255 is exact in float32); QML rounds them.
+            merged = np.empty((len(points), 6), dtype=np.float32)
+            merged[:, :3] = points
+            merged[:, 3:] = colors
+            self._pointcloud_cache = merged.tolist()
+            return self._pointcloud_cache
+
+        def _invalidate_pointcloud_cache(self) -> None:
+            self._pointcloud_cache = None
+
+        def _invalidate_raw_cloud_cache(self, camera=None) -> None:
+            """Drop the cached unprojection (depth changed)."""
+            if camera is None:
+                self._raw_cloud_cache.clear()
+            else:
+                self._raw_cloud_cache.pop(camera, None)
+
+        def _get_pointcloud_count(self) -> int:
+            return len(self._get_camera_pointcloud())
+
+        def _get_imu_active(self) -> bool:
+            return self._imu_attitude.get(self._view) is not None
+
+        def _get_imu_attitude_line(self) -> str:
+            attitude = self._imu_attitude.get(self._view)
+            if attitude is None:
+                return 'imu: —'
+            roll_deg = math.degrees(attitude[0])
+            pitch_deg = math.degrees(attitude[1])
+            state = 'stab on' if self._imu_enabled else 'stab off'
+            return 'imu: roll {:+.1f}° pitch {:+.1f}° ({})'.format(
+                roll_deg, pitch_deg, state)
+
+        # =================================================================
         # Annotation
         # =================================================================
+        def _depth_pixel_for(self, camera: str, u: int, v: int):
+            """Map an RGB pixel (u,v) to the aligned depth-map pixel.
+
+            Depth is aligned to the RGB camera and delivered at half the RGB
+            resolution (see oak_capture).  We scale by the ratio of the two
+            delivered sizes so the mapping stays correct even if the streams
+            are configured at other resolutions.  Returns ``(u_depth,
+            v_depth)``, or ``None`` if either header is missing.
+            """
+            rgb_state = self.model.state('v1/camera/{}/rgb'.format(camera))
+            depth_state = self.model.state('v1/camera/{}/depth'.format(camera))
+            rgb_h = rgb_state.last_header
+            depth_h = depth_state.last_header
+            if not rgb_h or not depth_h:
+                return None
+            try:
+                rgb_w = int(rgb_h.get('width', 0))
+                rgb_hgt = int(rgb_h.get('height', 0))
+                dep_w = int(depth_h.get('width', 0))
+                dep_hgt = int(depth_h.get('height', 0))
+            except (TypeError, ValueError):
+                return None
+            if not (rgb_w and rgb_hgt and dep_w and dep_hgt):
+                return None
+            u_depth = int(round(u * dep_w / rgb_w))
+            v_depth = int(round(v * dep_hgt / rgb_hgt))
+            return u_depth, v_depth
+
         @Slot(int, int)
         def annotate_click(self, u: int, v: int) -> None:
             camera = self._view
@@ -201,14 +441,22 @@ if _QT_AVAILABLE:
             header = self.model.state(
                 'v1/camera/{}/rgb'.format(camera)).last_header
             frame_id = (header or {}).get('frame_id', '')
+            backproject_u = backproject_v = None
             if depth is None:
                 depth_m = None
             else:
-                from .decoders.depth_decoder import DepthDecoder
-                depth_m = DepthDecoder().depth_at(
-                    depth, u, v, window=self.config.annotation_depth_window_px)
+                mapped = self._depth_pixel_for(camera, u, v)
+                if mapped is None:
+                    depth_m = None
+                else:
+                    du, dv = mapped
+                    backproject_u, backproject_v = du, dv
+                    from .decoders.depth_decoder import DepthDecoder
+                    depth_m = DepthDecoder().depth_at(
+                        depth, du, dv, window=self.config.annotation_depth_window_px)
             _accepted, message = self.annotation.build(
-                camera, u, v, depth_m, camera_info, frame_id)
+                camera, u, v, depth_m, camera_info, frame_id,
+                backproject_u=backproject_u, backproject_v=backproject_v)
             self._forward_annotation('created')
             self._toast_message(message)
             self.annotation_changed.emit()
@@ -497,6 +745,18 @@ if _QT_AVAILABLE:
         annotationV = Property(
             int, _get_annotation_v, notify=annotation_changed)
         toast = Property(str, _get_toast, notify=toast_changed)
+        pointcloudVisible = Property(
+            bool, _get_pointcloud_visible, notify=pointcloud_visible_changed)
+        cameraPointcloud = Property(
+            'QVariantList', _get_camera_pointcloud, notify=pointcloud_changed)
+        pointcloudCount = Property(
+            int, _get_pointcloud_count, notify=pointcloud_changed)
+        imuEnabled = Property(
+            bool, _get_imu_enabled, notify=imu_enabled_changed)
+        imuActive = Property(
+            bool, _get_imu_active, notify=imu_active_changed)
+        imuAttitudeLine = Property(
+            str, _get_imu_attitude_line, notify=imu_active_changed)
 
 
 __all__ = ['DashboardBridge', '_QT_AVAILABLE']

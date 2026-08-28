@@ -83,6 +83,20 @@ def synthetic_camera_info():
     }, separators=(',', ':')).encode('utf-8')
 
 
+def synthetic_imu_payload():
+    """A synthetic IMU sample: at rest, gravity along -Z (optical frame)."""
+    import json
+    return json.dumps({
+        'frame_id': 'cutter_camera_optical_frame',
+        'accel_ms2': [0.0, 0.0, -9.80665],
+        'gyro_rad_s': [0.0, 0.0, 0.0],
+        'attitude_rpy_rad': [0.0, 0.0, 0.0],
+        'accel_norm_ms2': 9.80665,
+        'sample_rate_hz': 200,
+        'n_samples': 1,
+    }, separators=(',', ':')).encode('utf-8')
+
+
 def synthetic_lidar_payload(count=200):
     """A synthetic XYZ float32 cloud (a flat ring)."""
     output = bytearray()
@@ -130,6 +144,28 @@ class SyntheticSource:
         header.update({'codec': 'jpeg', 'pixel_encoding': 'RGB8',
                        'width': 640, 'height': 360})
         agg.publish('v1/camera/docking/rgb', header, rgb)
+
+        # Docking depth
+        header = _base_header('v1/camera/docking/depth')
+        header.update({'codec': 'depth_uint16_le', 'width': 640, 'height': 360})
+        agg.publish('v1/camera/docking/depth', header, synthetic_depth_payload())
+
+        # Docking camera info
+        header = _base_header('v1/camera/docking/camera_info')
+        header.update({'codec': 'json', 'width': 640, 'height': 360})
+        agg.publish('v1/camera/docking/camera_info', header, synthetic_camera_info())
+
+        # Cutter IMU
+        header = _base_header('v1/camera/cutter/imu')
+        header.update({'codec': 'json',
+                       'frame_id': 'cutter_camera_optical_frame'})
+        agg.publish('v1/camera/cutter/imu', header, synthetic_imu_payload())
+
+        # Docking IMU
+        header = _base_header('v1/camera/docking/imu')
+        header.update({'codec': 'json',
+                       'frame_id': 'docking_camera_optical_frame'})
+        agg.publish('v1/camera/docking/imu', header, synthetic_imu_payload())
 
         # LiDAR
         header = _base_header('v1/lidar/raw')

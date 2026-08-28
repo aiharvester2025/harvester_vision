@@ -1,8 +1,11 @@
 import unittest
 
+import numpy as np
+
 from helpers import base_header
 
 from harvester_dashboard.model.target_model import AnnotationState, back_project
+from harvester_dashboard.decoders.pointcloud import unproject_depth
 
 
 class FakeClock:
@@ -37,6 +40,24 @@ class BackProjectTest(unittest.TestCase):
         self.assertIsNone(back_project(0, 0, 1.0, None))
         self.assertIsNone(back_project(0, 0, 1.0, {'k': [1, 2]}))
         self.assertIsNone(back_project(0, 0, 1.0, {'k': [0.0] * 9}))
+
+    def test_unproject_matches_back_project(self):
+        # The point-cloud unprojection must agree with the annotation
+        # back-projection for the same pixel + depth + intrinsics.
+        depth = np.full((48, 64), 2.0, dtype=np.float32)
+        rgb = np.zeros((48, 64, 3), dtype=np.uint8)
+        cloud = unproject_depth(depth, rgb, CAMERA_INFO, max_points=100000)
+        # Find the point for pixel (42, 14).
+        xs, ys, zs = cloud['points'][:, 0], cloud['points'][:, 1], cloud['points'][:, 2]
+        # Reconstruct which pixel each point came from via the inverse mapping.
+        # Instead of matching by index, verify the (u,v)->point math directly:
+        # pick the pixel (42,14), its expected (x,y,z).
+        expected = back_project(42, 14, 2.0, CAMERA_INFO)
+        # The cloud contains exactly one point per pixel; locate it by its x,y.
+        match = np.argmin(np.abs(xs - expected[0]) + np.abs(ys - expected[1]))
+        self.assertAlmostEqual(float(xs[match]), expected[0], places=5)
+        self.assertAlmostEqual(float(ys[match]), expected[1], places=5)
+        self.assertAlmostEqual(float(zs[match]), expected[2], places=5)
 
 
 class AnnotationStateTest(unittest.TestCase):
@@ -84,6 +105,31 @@ class AnnotationStateTest(unittest.TestCase):
         self.annotation.build('cutter', 5, 5, 1.0, CAMERA_INFO)
         self.annotation.clear()
         self.assertTrue(any('cleared' in event for event in self.annotation.events))
+
+    def test_backproject_uses_depth_pixel_not_rgb_pixel(self):
+        # When depth is delivered at half the RGB resolution, the back-projected
+        # 3-D point must use the depth-map pixel (du, dv), while the crosshair
+        # pixel stays at the RGB pixel the operator clicked (u, v).
+        accepted, _message = self.annotation.build(
+            'cutter', u=80, v=60, depth_m=2.0, camera_info=CAMERA_INFO,
+            frame_id='f', backproject_u=40, backproject_v=30)
+        self.assertTrue(accepted)
+        # Crosshair stays at the RGB pixel.
+        self.assertEqual(self.annotation.pixel, (80, 60))
+        # 3-D point is back-projected from the depth pixel (40, 30).
+        x, y, z = self.annotation.point_camera
+        self.assertAlmostEqual(x, (40 - 32) / 100.0 * 2.0)
+        self.assertAlmostEqual(y, (30 - 24) / 100.0 * 2.0)
+        self.assertAlmostEqual(z, 2.0)
+
+    def test_backproject_defaults_to_rgb_pixel(self):
+        # With no explicit backproject pixel, back-project uses (u, v) itself
+        # (the pre-remap behaviour, for pixel-aligned depth).
+        self.annotation.build('cutter', 42, 14, 1.0, CAMERA_INFO)
+        x, y, z = self.annotation.point_camera
+        self.assertAlmostEqual(x, (42 - 32) / 100.0)
+        self.assertAlmostEqual(y, (14 - 24) / 100.0)
+        self.assertAlmostEqual(z, 1.0)
 
 
 if __name__ == '__main__':

@@ -42,8 +42,15 @@ class AnnotationState:
         self.created_monotonic_s = None
 
     def build(self, camera: str, u: int, v: int, depth_m: Optional[float],
-              camera_info: Optional[dict], frame_id: str = '') -> Tuple[bool, str]:
+              camera_info: Optional[dict], frame_id: str = '',
+              backproject_u: Optional[int] = None,
+              backproject_v: Optional[int] = None) -> Tuple[bool, str]:
         """Create or refuse an annotation from a pixel click.
+
+        ``u``/``v`` are the RGB pixel the operator clicked (stored for the
+        crosshair overlay).  ``backproject_u``/``backproject_v`` are the pixel
+        in the depth map's own resolution used to back-project to 3-D (defaults
+        to ``u``/``v`` when the depth map is pixel-aligned with RGB).
 
         Returns ``(accepted, message)``.  Missing/zero depth is refused
         with a ``NO DEPTH`` style message and nothing is stored or
@@ -53,7 +60,9 @@ class AnnotationState:
             message = 'NO DEPTH at ({}, {}) — annotation rejected'.format(u, v)
             self._log(message)
             return False, message
-        point = back_project(u, v, depth_m, camera_info)
+        bu = u if backproject_u is None else int(backproject_u)
+        bv = v if backproject_v is None else int(backproject_v)
+        point = back_project(bu, bv, depth_m, camera_info)
         self.active = True
         self.camera = camera
         self.pixel = (int(u), int(v))

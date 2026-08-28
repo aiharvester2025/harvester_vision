@@ -26,11 +26,28 @@ DAI_PY="/home/marcop/depthai-env/bin/python3"
 SYS_PY="/usr/bin/python3"
 DISPLAY_TARGET="${DISPLAY:-:1}"
 OAK_START_DELAY_S="${OAK_START_DELAY_S:-5}"
-CODEC="${CODEC:-jpeg}"
+CODEC="${CODEC:-h265}"
+DEPTH="${DEPTH:-1}"
+IMU="${IMU:-1}"
+
+# Depth is on by default; DEPTH=0 keeps the OAK adapters RGB-only (byte-for-
+# byte the pre-depth behaviour).  Depth streams on the canonical
+# v1/camera/<name>/depth + camera_info channels and never affects RGB.
+DEPTH_FLAG=""
+if [[ "${DEPTH}" == "0" ]]; then
+  DEPTH_FLAG="--no-depth"
+fi
+
+# IMU is on by default; IMU=0 disables the v1/camera/<name>/imu stream (the
+# vibration-compensation source for the point cloud).
+IMU_FLAG=""
+if [[ "${IMU}" == "0" ]]; then
+  IMU_FLAG="--no-imu"
+fi
 
 AGG_CMD="PYTHONPATH=canonical_zmq:. ${DAI_PY} -m canonical_zmq_publisher.main --ingest tcp://*:5570"
-DOCK_CMD="PYTHONPATH=canonical_zmq:. ${DAI_PY} -m canonical_zmq_publisher.oak_capture --camera-role docking_camera --ingest-endpoint tcp://127.0.0.1:5570 --supervise --codec ${CODEC} --ev-compensation 0 --brightness 0 --contrast 0"
-CUT_CMD="PYTHONPATH=canonical_zmq:. ${DAI_PY} -m canonical_zmq_publisher.oak_capture --camera-role cutting_camera --ingest-endpoint tcp://127.0.0.1:5570 --supervise --codec ${CODEC} --ev-compensation 0 --brightness 0 --contrast 0"
+DOCK_CMD="PYTHONPATH=canonical_zmq:. ${DAI_PY} -m canonical_zmq_publisher.oak_capture --camera-role docking_camera --ingest-endpoint tcp://127.0.0.1:5570 --supervise --codec ${CODEC} --ev-compensation 0 --brightness 0 --contrast 0 ${DEPTH_FLAG} ${IMU_FLAG}"
+CUT_CMD="PYTHONPATH=canonical_zmq:. ${DAI_PY} -m canonical_zmq_publisher.oak_capture --camera-role cutting_camera --ingest-endpoint tcp://127.0.0.1:5570 --supervise --codec ${CODEC} --ev-compensation 0 --brightness 0 --contrast 0 ${DEPTH_FLAG} ${IMU_FLAG}"
 # MALLOC_ARENA_MAX=2 caps glibc at two malloc arenas (default is cores*8=32 on
 # aarch64), which keeps the per-frame 6 MB numpy buffers from fragmenting the
 # process address space into hundreds of mmap'd arenas.  This is the dominant

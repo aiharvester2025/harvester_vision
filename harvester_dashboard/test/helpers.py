@@ -62,6 +62,49 @@ def depth_packet(channel, depth_m=None, width=8, height=6, sequence=1,
     return pack_message(channel, header, millimetres.tobytes())
 
 
+def camera_info_packet(channel, width=8, height=6, sequence=1, **header_overrides):
+    import json as _json
+    info = {
+        'width': width, 'height': height,
+        'distortion_model': 'plumb_bob',
+        'd': [0.0, 0.0, 0.0, 0.0, 0.0],
+        'k': [500.0, 0.0, width / 2.0, 0.0, 500.0, height / 2.0,
+              0.0, 0.0, 1.0],
+        'r': [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+        'p': [500.0, 0.0, width / 2.0, 0.0, 0.0, 500.0, height / 2.0,
+              0.0, 0.0, 0.0, 1.0, 0.0],
+        'binning_x': 1, 'binning_y': 1,
+        'roi': {'x_offset': 0, 'y_offset': 0, 'height': height, 'width': width,
+                'do_rectify': False},
+    }
+    header = base_header(
+        sequence=sequence,
+        codec='json',
+        width=width,
+        height=height,
+        **header_overrides)
+    return pack_message(channel, header, _json.dumps(info).encode('utf-8'))
+
+
+def imu_packet(channel, accel_ms2=None, gyro_rad_s=None, attitude=None,
+               sequence=1, **header_overrides):
+    import json as _json
+    payload = {
+        'frame_id': 'test_optical_frame',
+        'accel_ms2': accel_ms2 if accel_ms2 is not None else [0.0, 0.0, -9.80665],
+        'gyro_rad_s': gyro_rad_s if gyro_rad_s is not None else [0.0, 0.0, 0.0],
+        'attitude_rpy_rad': attitude if attitude is not None else [0.0, 0.0, 0.0],
+        'accel_norm_ms2': 9.80665,
+        'sample_rate_hz': 200,
+        'n_samples': 1,
+    }
+    header = base_header(
+        sequence=sequence,
+        codec='json',
+        **header_overrides)
+    return pack_message(channel, header, _json.dumps(payload).encode('utf-8'))
+
+
 def lidar_packet(points=None, sequence=1, **header_overrides):
     points = (np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [-1.0, 0.5, 2.0]],
                        dtype='<f4') if points is None else

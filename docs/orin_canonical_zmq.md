@@ -83,8 +83,10 @@ DISPLAY=:1 PYTHONPATH=harvester_dashboard /usr/bin/python3 \
 ```
 
 Controls: `1` cutter view, `2` docking view (render-only), `3` sensor HUD,
-`4` LiDAR inset, `5` LiDAR projection, `0`/`Esc` clear annotation, click to
-annotate. All actions are non-actuating annotations only.
+`4` LiDAR inset, `5` LiDAR projection, `6` camera point-cloud inset,
+`0`/`Esc` clear annotation, click to annotate (shows depth + camera-frame XYZ
+when the OAK depth stream is on). All actions are non-actuating annotations
+only. See `docs/oak_depth_pointcloud.md` for the depth/point-cloud feature.
 
 ## Tests
 
@@ -98,19 +100,22 @@ PYTHONPATH=harvester_dashboard /usr/bin/python3 \
   -m unittest discover -s harvester_dashboard/test -v
 ```
 
-## Hardware adapters (deferred — later task)
+## Hardware adapters
 
-The Orin aggregator already exposes the ingest boundary (`--ingest
-tcp://*:5570`, a PULL socket) and the relay/synthetic modes. The future
-adapters PUSH canonical packets into that PULL socket and never bind the
-canonical `5590` themselves:
+The Orin aggregator exposes the ingest boundary (`--ingest tcp://*:5570`, a
+PULL socket). Adapters PUSH canonical packets into that PULL socket and never
+bind the canonical `5590` themselves.
 
-- `oak_capture` — OAK DepthAI v3, H.264/H.265 primary + Jetson hardware decode,
-  MJPEG fallback (header `codec`/`pixel_encoding`/`keyframe`).
-- `lidar_ingest` — MID-360 UDP, XYZ (deskew later), `v1/lidar/raw`.
-- `range_ingest` — Pi/PLC range sensors normalized to canonical `telemetry_key`
-  set, `v1/range/docking` / `v1/range/cutter`.
-- `cutter_range_ingest` — `v1/range/cutter`.
+- `oak_capture` — **implemented** (see `docs/oak_depth_pointcloud.md`). OAK
+  DepthAI v3 RGB H.264/H.265 primary + MJPEG fallback, plus stereo **depth**
+  (`v1/camera/<name>/depth`, `depth_uint16_le`) and **camera_info** intrinsics
+  (`v1/camera/<name>/camera_info`, `json`). Launched by `run_all.sh`
+  (default `CODEC=jpeg`, depth on; `DEPTH=0` disables depth).
+- `lidar_ingest` — **deferred** (MID-360 UDP, XYZ, `v1/lidar/raw`). See
+  `.kilo/plans/mid360-lidar-integration.md`.
+- `range_ingest` — **deferred** (Pi/PLC range sensors → `v1/range/docking`,
+  `v1/range/cutter`).
+- `cutter_range_ingest` — **deferred** (`v1/range/cutter`).
 
 Safety boundary (unchanged): observation-only. The aggregator never emits a
 joint, velocity, PLC, solenoid, or motion command; its REP is read-only.
@@ -151,6 +156,19 @@ model:
   live-latency/dropping logic that fought a stateless per-frame JPEG feed;
   `is-live=false` lets each self-contained JPEG flow straight through.
 
-The `nvvidconv` RGBA conversion, the NVDEC green-concealment guard
-(`_is_green_concealment`), and the per-`frame_id` pipeline reuse are all
-unchanged.
+The `nvvidconv` RGBA conversion and the per-`frame_id` pipeline reuse are
+unchanged. The NVDEC green-concealment guard (`_is_green_concealment`) applies
+**only to the JPEG/`nvjpegdec` path** (`jetson_jpeg.py`) — H.264/H.265 NVDEC
+does not emit that artifact, so `jetson_decode.py` has no such check.
+
+**H.264/H.265 frame-path optimization.** `jetson_decode.py` was later tuned to
+reduce per-frame CPU at 1080p (see `docs/oak_depth_pointcloud.md`):
+
+- `appsrc` switched to `is-live=false do-timestamp=false` (was `is-live=true`).
+- The decoded frame is produced as a **single contiguous HxWx3 copy** (drop the
+  RGBA alpha byte in one `[:, :, :3].copy()`), avoiding a second
+  `ascontiguousarray` copy in the image provider.
+
+The dashboard also decodes only the **active** camera's RGB + depth streams
+(active-camera-only decode), halving the `nvv4l2decoder` driver-thread CPU
+(two 1080p H.265 decodes → one).

@@ -19,9 +19,11 @@ CANONICAL_CHANNELS = frozenset({
     'v1/camera/cutter/rgb',
     'v1/camera/cutter/depth',
     'v1/camera/cutter/camera_info',
+    'v1/camera/cutter/imu',
     'v1/camera/docking/rgb',
     'v1/camera/docking/depth',
     'v1/camera/docking/camera_info',
+    'v1/camera/docking/imu',
     'v1/lidar/raw',
     'v1/range/docking',
     'v1/range/cutter',
@@ -81,6 +83,13 @@ def _validate_image_header(channel: str, header: Mapping[str, Any]) -> None:
             raise ProtocolError("header field {!r} must be positive".format(name))
 
 
+def _validate_imu_header(channel: str, header: Mapping[str, Any]) -> None:
+    """IMU has no image geometry, so it uses a JSON payload and must NOT be
+    forced through the image validator (which requires positive width/height)."""
+    if header.get('codec') != 'json':
+        raise ProtocolError("{} requires json codec".format(channel))
+
+
 def _validate_lidar_header(header: Mapping[str, Any]) -> None:
     if header.get('codec') != 'lidar_xyz_f32':
         raise ProtocolError("v1/lidar/raw requires lidar_xyz_f32 codec")
@@ -137,7 +146,9 @@ def validate_header(channel: str, header: Mapping[str, Any]) -> Dict[str, Any]:
     _require_nonnegative('acquisition_timestamp_ns', result['acquisition_timestamp_ns'])
     _require_nonnegative('gateway_monotonic_ns', result['gateway_monotonic_ns'])
 
-    if channel.startswith('v1/camera/'):
+    if channel.startswith('v1/camera/') and channel.endswith('/imu'):
+        _validate_imu_header(channel, result)
+    elif channel.startswith('v1/camera/'):
         _validate_image_header(channel, result)
     elif channel == 'v1/lidar/raw':
         _validate_lidar_header(result)

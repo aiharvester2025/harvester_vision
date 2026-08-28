@@ -133,7 +133,7 @@ class SocketDrainer:
 
 
 try:
-    from PySide2.QtCore import QObject, QThread, QTimer, Signal
+    from PySide2.QtCore import QObject, QThread, QTimer, Signal, Slot
     _QT_AVAILABLE = True
 except ImportError:  # pragma: no cover - pure-python test path
     _QT_AVAILABLE = False
@@ -144,6 +144,11 @@ except ImportError:  # pragma: no cover - pure-python test path
     def Signal(*args, **kwargs):  # type: ignore[misc]
         def _decorated(*_a, **_k):
             raise RuntimeError('PySide2 unavailable')
+        return _decorated
+
+    def Slot(*args, **kwargs):  # type: ignore[misc]
+        def _decorated(fn):
+            return fn
         return _decorated
 
 
@@ -173,6 +178,45 @@ if _QT_AVAILABLE:
             self._timer: Optional[QTimer] = None
             self._pending: list = []
             self._pending_errors: list = []
+            # Which camera ('cutter'|'docking') is currently displayed.  Only
+            # this camera's RGB stream is hardware-decoded; the inactive
+            # camera's H.265/H.264 frames are dropped before reaching the
+            # stateful NVDEC decoder, halving the host-side decode CPU (the
+            # nvv4l2decoder driver threads are ~35% each on the Orin).  Set
+            # from the UI thread via the queued ``set_active_camera`` slot.
+            self._active_camera = 'cutter'
+
+        def set_active_camera(self, camera: str) -> None:
+            """Update the active camera (queued from the UI thread).
+
+            Closes the newly-inactive camera's stateful NVDEC decoder so its
+            driver thread fully idles (not just starved of input), and lets a
+            fresh decoder be created when that camera becomes active again
+            (the OAK re-sends SPS/PPS keyframes on re-subscribe, so the decode
+            renegotiates cleanly).
+            """
+            if camera not in ('cutter', 'docking') or camera == self._active_camera:
+                return
+            previous = self._active_camera
+            self._active_camera = camera
+            # Drop the stateful decoder(s) of the camera we just left.
+            for (codec, frame_id) in list(SocketDrainer._stateful_decoders.keys()):
+                if self._frame_id_is_camera(frame_id, previous):
+                    dec = SocketDrainer._stateful_decoders.pop((codec, frame_id), None)
+                    if dec is not None:
+                        try:
+                            dec.close()
+                        except Exception:
+                            pass
+
+        @staticmethod
+        def _frame_id_is_camera(frame_id: str, camera: str) -> bool:
+            """True when a frame_id belongs to the named camera."""
+            if camera == 'cutter':
+                return 'cutter' in frame_id
+            if camera == 'docking':
+                return 'docking' in frame_id
+            return False
 
         def start(self):
             self.drainer = SocketDrainer(self._endpoint, hwm=self._hwm)
@@ -212,6 +256,29 @@ if _QT_AVAILABLE:
                     (channel or 'unknown', 'packet failed contract validation'))
                 return
             decoded = parsed
+            if channel.endswith('/rgb') or channel.endswith('/depth'):
+                # Active-camera-only decode: the inactive camera's H.265/H.264
+                # RGB frames AND its depth maps are dropped here (before
+                # reaching the stateful NVDEC decoder or the float32 depth
+                # conversion).  Only one nvv4l2decoder driver thread runs at a
+                # time and the inactive camera's ~2 MB/frame depth decode is
+                # skipped, roughly halving the dashboard's decode CPU on the
+                # Orin without changing resolution or codec.  The packet is
+                # still ingested into the model (freshness counters), only the
+                # decode is skipped.
+                if not self._channel_is_active(channel):
+                    self._pending.append((channel, header, payload, None))
+                    return
+            elif channel.endswith('/imu'):
+                # Active-camera-only IMU: drop the inactive camera's parsed IMU
+                # JSON so its attitude bookkeeping and any downstream work are
+                # skipped.  The packet is still ingested for freshness counters.
+                # (The parsed value is nulled here; ingest_packet re-parses the
+                # raw payload only for the model's own JSON storage, which is
+                # cheap and not wired to the point-cloud path.)
+                if not self._channel_is_active(channel):
+                    self._pending.append((channel, header, payload, None))
+                    return
             if not channel.startswith('v1/operator/'):
                 try:
                     frame = SocketDrainer.decode_frame(channel, header, payload)
@@ -224,8 +291,20 @@ if _QT_AVAILABLE:
                         decoded = frame
             self._pending.append((channel, header, payload, decoded))
 
+        def _channel_is_active(self, channel: str) -> bool:
+            """Instance check: is this /rgb channel the active camera's?"""
+            if '/cutter/' in channel:
+                return self._active_camera == 'cutter'
+            if '/docking/' in channel:
+                return self._active_camera == 'docking'
+            return True
+
     class TelemetrySource(QObject):
         """UI-thread facade: worker QThread + queued-signal plumbing."""
+
+        # Forwarded to the worker thread (queued) so the worker knows which
+        # camera to hardware-decode.
+        active_camera_changed = Signal(str)
 
         def __init__(self, config, model, parent=None):
             super().__init__(parent)
@@ -239,6 +318,8 @@ if _QT_AVAILABLE:
             self.worker.batch_ready.connect(self._on_batch)
             self.worker.decode_failed.connect(self._on_decode_failed)
             self.worker.counters_updated.connect(self._on_counters)
+            # Queued: set_active_camera runs on the worker thread.
+            self.active_camera_changed.connect(self.worker.set_active_camera)
             self.on_frame = None   # UI hook (channel, decoded) for provider/bridge
 
         def start(self):
@@ -247,6 +328,11 @@ if _QT_AVAILABLE:
         def stop(self):
             self.thread.quit()
             self.thread.wait(2000)
+
+        @Slot(str)
+        def set_active_camera(self, camera: str) -> None:
+            """Set the active camera; the worker picks it up on its thread."""
+            self.active_camera_changed.emit(camera)
 
         # -- UI-thread slots -------------------------------------------------
         def _on_batch(self, batch):

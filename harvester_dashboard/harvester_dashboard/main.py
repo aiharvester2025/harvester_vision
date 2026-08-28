@@ -61,6 +61,16 @@ def main(argv=None) -> int:
     provider = FrameImageProvider()
     source = TelemetrySource(config, model)
     source.on_frame = _make_frame_sink(bridge, provider)
+    # IMU (and other JSON channels) flow through the model's on_json hook, not
+    # the frame sink (which only carries decoded image/depth/lidar frames).
+    model.on_json = bridge.on_json_packet
+    # Active-camera-only decode: when the operator switches cameras, the
+    # worker stops hardware-decoding the inactive camera's stream.  This
+    # halves the nvv4l2decoder driver CPU on the Orin (two 1080p H.265
+    # decodes -> one) without changing resolution or codec.
+    bridge.view_changed.connect(
+        lambda: source.set_active_camera(bridge.view))
+    source.set_active_camera(bridge.view)
 
     # QQuickView (not QQmlApplicationEngine): Controls2 is unavailable on
     # this PySide2 build, so the root is a plain Item that QQuickView wraps
@@ -136,10 +146,11 @@ def _make_frame_sink(bridge, provider):
         if channel.endswith('/rgb'):
             camera = 'cutter' if '/cutter/' in channel else 'docking'
             provider.publish_rgb(camera, decoded)
-        elif channel.endswith('/depth'):
-            from .image_provider import colorize_depth
-            camera = 'cutter' if '/cutter/' in channel else 'docking'
-            provider.publish_depth_colored(camera + '_depth', decoded)
+        # Depth is NOT colorized/published here: no QML consumes the
+        # depth-colored image, and colorizing a 960x540 plane per depth frame
+        # (15 FPS x 2 cameras) wasted ~1.5 MB x 2 per frame and contributed to
+        # the dashboard OOM.  Click-depth and the point cloud read the decoded
+        # depth directly via the bridge.
     return sink
 
 

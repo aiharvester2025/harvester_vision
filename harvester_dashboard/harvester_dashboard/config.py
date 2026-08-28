@@ -22,6 +22,7 @@ class DashboardConfig:
     socket_hwm: int = 8
     lidar_max_points: int = 2000
     annotation_depth_window_px: int = 3
+    pointcloud_max_points: int = 2000
     qml_directory: Optional[str] = None
 
     @property
@@ -53,6 +54,8 @@ class DashboardConfig:
                             help='subscriber RCVHWM in packets')
         parser.add_argument('--lidar-max-points', type=int, default=2000,
                             help='maximum LiDAR points kept for the inset scatter')
+        parser.add_argument('--pointcloud-max-points', type=int, default=2000,
+                            help='maximum depth-unprojected points kept for the camera point-cloud panel')
         known, _unknown = parser.parse_known_args(args)
         return cls(
             pub_endpoint=known.pub,
@@ -64,4 +67,5 @@ class DashboardConfig:
             socket_hwm=max(1, known.socket_hwm),
             lidar_max_points=max(1, known.lidar_max_points),
             qml_directory=known.qml_directory if hasattr(known, 'qml_directory') else None,
+            pointcloud_max_points=max(1, known.pointcloud_max_points),
         )
