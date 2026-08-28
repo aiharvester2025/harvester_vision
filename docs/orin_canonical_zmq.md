@@ -88,6 +88,33 @@ Controls: `1` cutter view, `2` docking view (render-only), `3` sensor HUD,
 when the OAK depth stream is on). All actions are non-actuating annotations
 only. See `docs/oak_depth_pointcloud.md` for the depth/point-cloud feature.
 
+### HUD layers (operator vs. developer diagnostics)
+
+The sensor HUD is split into two independently-toggled layers:
+
+- **Operator HUD** (key `3` / "3 HUD" button) — the operational guidance an
+  operator needs: docking phase guide, boom angle/extension/leveling, the five
+  docking ranges, cutter range, trunk estimate, calibration status, the
+  MIXED-SOURCES warning, and the source badge.
+
+- **Developer-diagnostic HUD** (key sequence **`7` `7` `7` then `Enter`**) — the
+  health overlays useful only when debugging: the bottom per-channel stream
+  table ("streams recv … drops …" + age/gaps/decode-errors per channel), the
+  toolbar status line ("status … | drops … | rec on/off"), the active-camera
+  timestamp line, and the stale-camera red ring.
+
+Notes on the `777`+`Enter` sequence:
+
+- Only the `7` key is buffered (it is ambiguous with the single-key `7` IMU
+  toggle). A lone `7` still toggles IMU stabilization after a short (~800 ms)
+  idle, while a fast `7`-`7`-`7` followed by `Enter` toggles the diagnostic
+  layer.
+- The two layers are independent: `3` shows/hides the operator HUD regardless
+  of the diagnostic state, and `777`+`Enter` shows/hides the diagnostic
+  overlays regardless of the operator HUD.
+- Both toggles are render-only: neither writes to any telemetry or control
+  socket (the safety boundary is unchanged).
+
 ## Tests
 
 ```bash
@@ -108,13 +135,19 @@ bind the canonical `5590` themselves.
 
 - `oak_capture` — **implemented** (see `docs/oak_depth_pointcloud.md`). OAK
   DepthAI v3 RGB H.264/H.265 primary + MJPEG fallback, plus stereo **depth**
-  (`v1/camera/<name>/depth`, `depth_uint16_le`) and **camera_info** intrinsics
-  (`v1/camera/<name>/camera_info`, `json`). Launched by `run_all.sh`
-  (default `CODEC=jpeg`, depth on; `DEPTH=0` disables depth).
+  (`v1/camera/<name>/depth`, `depth_uint16_le`), **camera_info** intrinsics
+  (`v1/camera/<name>/camera_info`, `json`), and an onboard **IMU** stream
+  (`v1/camera/<name>/imu`, `json`) for point-cloud vibration compensation.
+  Launched by `run_all.sh` (default `CODEC=h265`, depth + imu on; `DEPTH=0`
+  disables depth, `IMU=0` disables the IMU stream).
 - `lidar_ingest` — **deferred** (MID-360 UDP, XYZ, `v1/lidar/raw`). See
   `.kilo/plans/mid360-lidar-integration.md`.
-- `range_ingest` — **deferred** (Pi/PLC range sensors → `v1/range/docking`,
-  `v1/range/cutter`).
+- `range_ingest` — **implemented** (see `.kilo/plans/plc-docking-sequence-simulation.md`).
+  Subscribes to the Pi PLC's single-part JSON stream (`tcp://192.168.50.40:5555`,
+  topic `harvester.sensors.v1`) and PUSHes canonical packets for
+  `v1/range/docking` (the five docking ranges), `v1/boom/state` (boom angle,
+  extension, leveling, phase), and `v1/docking/trunk_estimate`. Launched by
+  `run_all.sh`.
 - `cutter_range_ingest` — **deferred** (`v1/range/cutter`).
 
 Safety boundary (unchanged): observation-only. The aggregator never emits a
@@ -171,4 +204,35 @@ reduce per-frame CPU at 1080p (see `docs/oak_depth_pointcloud.md`):
 
 The dashboard also decodes only the **active** camera's RGB + depth streams
 (active-camera-only decode), halving the `nvv4l2decoder` driver-thread CPU
-(two 1080p H.265 decodes → one).
+(two 1080p H.265 decodes → one). The inactive camera's **IMU** stream is
+similarly dropped (only the active camera's point cloud is stabilized).
+
+### CPU / rate budget
+
+The Orin runs 4 online CPU cores (cores 4-7 are offline by default; see the
+MID-360/VIO plan before enabling them). The harvester stack's software cost is
+bounded by matching low-rate streams to their consumers:
+
+- IMU publishes at `--imu-fps 5` Hz (matching depth), not the raw sensor rate —
+  vibration compensation only needs a few Hz.
+- The point cloud is derived **in the dashboard** at render time, subsampled to
+  `--pointcloud-max-points` (default 2000), and its flatten-to-QML conversion
+  is vectorized (single numpy `tolist()`), keeping the dashboard main thread in
+  the low single-digit percent.
+- The remaining dashboard cost is the **irreducible NVDEC hardware H.265 decode
+  thread** (~30% of one core); everything else is a few percent each.
+
+On the deployed unit (headless, no remote desktop) the stack uses roughly a
+third of the 4-core budget. Remote-access tooling (Anydesk screen streaming,
+VS Code/kilo server) is CPU-hungry and will push a 4-core box toward 100% when
+active; that overhead is not part of the product and does not reflect the
+headless deployment.
+
+### OAK device-disconnect resilience
+
+The OAK devices can drop their XLink connection when the host CPU is briefly
+saturated (the DepthAI monitor thread misses a keepalive ping). `oak_capture`
+treats this as a clean exit (no traceback) so `--supervise` restarts it, and
+`_open_pipeline` retries discovery for 60 s with progress logging (not 20 s),
+so a restarted child waits out the device's ~10-15 s reconnection window
+instead of churning through "cannot find device" restarts.

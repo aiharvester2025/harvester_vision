@@ -41,9 +41,9 @@ Item {
         view.display_y = (view.height - view.display_h) / 2;
     }
 
-    // Stale indicator ring around the whole view.
+    // Stale indicator ring around the whole view (developer diagnostic).
     Rectangle {
-        visible: bridge.activeCameraStale
+        visible: bridge.activeCameraStale && bridge.diagnosticVisible
         anchors.fill: parent
         color: "transparent"
         border.color: "#e23c3c"
@@ -77,6 +77,7 @@ Item {
     }
 
     Text {
+        visible: bridge.diagnosticVisible
         anchors.bottom: parent.bottom
         anchors.left: parent.left
         anchors.margins: 8

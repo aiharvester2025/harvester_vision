@@ -107,6 +107,21 @@ motion.
   **active** camera's IMU is processed (the inactive camera's IMU is dropped,
   matching the existing active-camera-only depth decode).
 
+### Device-disconnect resilience
+
+The OAK devices can drop their XLink connection when the host CPU is briefly
+saturated (the DepthAI monitor thread misses a keepalive ping). `oak_capture`
+handles this without crashing:
+
+- `run()` wraps `queue.get()` so a disconnect is a clean "exiting for supervisor
+  restart" exit, not an unhandled `MessageQueue.QueueException` traceback.
+- `_open_pipeline()` retries discovery for **60 s** (was 20 s) with progress
+  logging, so a `--supervise`-restarted child waits out the device's ~10-15 s
+  reconnection window instead of churning through "cannot find device"
+  restarts.
+- The stereo **depth** path is also guarded: a unit without a stereo pair
+  (e.g. OAK-D-Lite) degrades to RGB-only rather than crashing the adapter.
+
 ## Dashboard
 
 ### Click-to-depth (accuracy-critical)
@@ -136,6 +151,19 @@ Rendered by `qml/PointCloudInset.qml` (top-right of the camera view), toggled
 by key `6` / "6 Pts" button, and recomputed only when visible and for the
 active camera.
 
+**Performance notes (dashboard main-thread CPU):**
+
+- The depth unprojection is **cached per camera** (`bridge._raw_cloud_cache`),
+  so an IMU attitude update re-applies only the cheap rotation
+  (`stabilize_points`, ~0.4 ms) instead of re-running the ~3.3 ms unprojection.
+- The flattened `[x, y, z, r, g, b]` list for QML is built with a **single
+  vectorized `numpy` `tolist()`** (one N×6 float32 array) rather than a
+  Python `zip`/`int()` loop — ~3× faster. QML rounds the color channels
+  (`Math.round`) since they arrive as float32.
+- Combined with the 5 Hz IMU rate, this keeps the dashboard's *software* main
+  thread in the low single-digit percent; the dominant remaining cost is the
+  irreducible NVDEC hardware H.265 decode thread.
+
 ### Active-camera-only decode
 
 `zmq_source.TelemetryWorker` decodes only the **active** camera's `/rgb` and
@@ -159,12 +187,16 @@ closed. This halves the dashboard's `nvv4l2decoder` driver-thread CPU
 
 ```bash
 cd ~/harvester_vision
-CODEC=h265 ./run_all.sh foreground       # depth on by default
-DEPTH=0 ./run_all.sh foreground          # RGB-only
+CODEC=h265 ./run_all.sh foreground       # depth + imu on by default
+DEPTH=0 ./run_all.sh foreground          # RGB-only (no depth, no camera_info)
+IMU=0 ./run_all.sh foreground            # disable the IMU stream
 ```
 
 Controls: `1`/`2` switch camera, `3` HUD, `4` LiDAR inset, `5` LiDAR view,
-`6` point cloud, `0`/`Esc` clear, click to annotate (shows depth + XYZ).
+`6` point cloud, `7` IMU stabilization toggle, `0`/`Esc` clear, click to
+annotate (shows depth + XYZ). `7` `7` `7` then `Enter` toggles the
+developer-diagnostic HUD layer (stream table, status line, timestamp line,
+stale ring) — see `docs/orin_canonical_zmq.md`.
 
 Verify the depth stream (dimensions, valid pixels, intrinsics):
 
@@ -182,9 +214,13 @@ PYTHONPATH=canonical_zmq:. /home/marcop/depthai-env/bin/python3 \
 
 ## Tests
 
-- `canonical_zmq/test/test_oak_capture.py` — depth/camera_info header builders,
-  capability flags, round-trips.
+- `canonical_zmq/test/test_oak_capture.py` — depth/camera_info/imu header
+  builders, capability flags, round-trips, `gravity_to_rpy`, `_rotate_vec3`.
 - `harvester_dashboard/test/test_pointcloud.py` — `unproject_depth`
-  (constant-depth distance, invalid pixels, downsampling, colour mapping).
+  (constant-depth distance, invalid pixels, downsampling, colour mapping) and
+  unproject-then-stabilize distance preservation.
+- `harvester_dashboard/test/test_imustab.py` — `gravity_to_rpy`,
+  `tilt_delta_rotation`, `stabilize_points` (identity, distance preservation,
+  roll removal).
 - `harvester_dashboard/test/test_target_model.py` — back-project depth-pixel vs
   RGB-pixel separation; `unproject_depth` ↔ `back_project` agreement.

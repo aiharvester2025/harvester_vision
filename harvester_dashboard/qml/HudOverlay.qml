@@ -33,7 +33,7 @@ Item {
         anchors.margins: 8
     }
 
-    // Right panel: trunk + calibration + capabilities.
+    // Right panel: trunk + calibration (operator-facing only).
     Column {
         anchors.right: parent.right
         anchors.top: parent.top
@@ -49,8 +49,7 @@ Item {
             Text {
                 id: trunk_cal_text
                 anchors.centerIn: parent
-                text: bridge.trunkLine + "\n" + bridge.calibrationLine + "\n"
-                      + bridge.capabilitiesLine
+                text: bridge.trunkLine + "\n" + bridge.calibrationLine
                 color: "#cfe3f5"
                 font.pixelSize: 12
                 horizontalAlignment: Text.AlignRight
@@ -59,8 +58,10 @@ Item {
     }
 
     // Bottom: stream errors panel (collapsible rows per channel).
+    // Developer-diagnostic: gated on the 777+Enter diagnostic toggle.
     Rectangle {
         id: errors_panel
+        visible: bridge.diagnosticVisible
         anchors.bottom: parent.bottom
         anchors.left: parent.left
         anchors.right: parent.right

@@ -72,6 +72,7 @@ class NoEmitProofTest(unittest.TestCase):
             bridge.set_view('cutter')
             bridge.toggle_hud()
             bridge.toggle_lidar()
+            bridge.toggle_diagnostic()
             for _ in range(5):
                 app.processEvents()
             # The annotation spy channel must stay silent: view switching
@@ -86,6 +87,33 @@ class NoEmitProofTest(unittest.TestCase):
             bridge.toggle_hud()
         if not bridge.lidarVisible:
             bridge.toggle_lidar()
+        if not bridge.diagnosticVisible:
+            bridge.toggle_diagnostic()
+
+    def test_diagnostic_toggle_flips_property(self):
+        try:
+            from PySide2.QtGui import QGuiApplication
+            from harvester_dashboard.bridge import DashboardBridge
+            from harvester_dashboard.config import DashboardConfig
+            from harvester_dashboard.model.telemetry_model import TelemetryModel
+            from harvester_dashboard.model.target_model import AnnotationState
+        except ImportError:
+            self.skipTest('PySide2 unavailable')
+
+        app = QGuiApplication.instance() or QGuiApplication(['diag-toggle-test'])
+        model = TelemetryModel()
+        annotation = AnnotationState()
+        config = DashboardConfig(
+            pub_endpoint='tcp://127.0.0.1:55901',
+            status_endpoint='',
+            annotation_endpoint='',
+        )
+        bridge = DashboardBridge(config, model, annotation)
+        initial = bridge.diagnosticVisible
+        bridge.toggle_diagnostic()
+        self.assertNotEqual(bridge.diagnosticVisible, initial)
+        bridge.toggle_diagnostic()
+        self.assertEqual(bridge.diagnosticVisible, initial)
 
     def test_annotation_publisher_disabled_has_no_socket(self):
         publisher = AnnotationPublisher('')   # default disabled

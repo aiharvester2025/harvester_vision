@@ -8,17 +8,55 @@ Item {
     width: 1280
     height: 800
 
+    // Multi-key sequence buffer for the developer-diagnostic toggle (777 + Enter).
+    // Only "7" is buffered (it is ambiguous with the single-key IMU toggle); all
+    // other keys act immediately.  A lone "7" still toggles IMU after the 800 ms
+    // flush timer empties the buffer.
+    property string key_buffer: ""
+
+    Timer {
+        id: key_buffer_timer
+        interval: 800
+        repeat: false
+        onTriggered: {
+            // Flush: a lone "7" (not committed with Enter) toggles IMU.
+            if (root.key_buffer === "7") bridge.toggle_imu();
+            root.key_buffer = "";
+        }
+    }
+
     // Keyboard: 1/2 view switch (render-only), 3 HUD, 4 LiDAR, 5 cycle LiDAR
-    // view, 6 point cloud, 7 IMU stabilization, 0/Esc clear.
+    // view, 6 point cloud, 7 IMU stabilization, 0/Esc clear, 777+Enter toggles
+    // the developer-diagnostic HUD.
     focus: true
     Keys.onPressed: {
+        // Buffer "7" presses; commit "777" on Enter.
+        if (event.key === Qt.Key_7) {
+            root.key_buffer += "7";
+            if (root.key_buffer.length > 8) root.key_buffer = root.key_buffer.slice(-8);
+            key_buffer_timer.restart();
+            event.accepted = true;
+            return;
+        }
+        if (event.key === Qt.Key_Enter || event.key === Qt.Key_Return) {
+            if (root.key_buffer === "777") { bridge.toggle_diagnostic(); }
+            root.key_buffer = "";
+            key_buffer_timer.stop();
+            event.accepted = true;
+            return;
+        }
+        // Any other key flushes the pending "7" buffer, then falls through.
+        if (root.key_buffer !== "") {
+            root.key_buffer = "";
+            key_buffer_timer.stop();
+        }
+
         if (event.key === Qt.Key_1) { bridge.set_view("cutter"); event.accepted = true; }
         else if (event.key === Qt.Key_2) { bridge.set_view("docking"); event.accepted = true; }
         else if (event.key === Qt.Key_3) { bridge.toggle_hud(); event.accepted = true; }
         else if (event.key === Qt.Key_4) { bridge.toggle_lidar(); event.accepted = true; }
         else if (event.key === Qt.Key_5) { bridge.cycle_lidar_view(); event.accepted = true; }
         else if (event.key === Qt.Key_6) { bridge.toggle_pointcloud(); event.accepted = true; }
-        else if (event.key === Qt.Key_7) { bridge.toggle_imu(); event.accepted = true; }
         else if (event.key === Qt.Key_0 || event.key === Qt.Key_Escape) {
             bridge.clear_annotation(); event.accepted = true;
         }
@@ -82,9 +120,12 @@ Item {
             }
         }
 
+        // Source badge (operator-facing) and status line (developer diagnostic,
+        // hidden when the diagnostic HUD is toggled off).
         Text {
             Layout.fillWidth: true
-            text: "  " + bridge.sourceBadge + "   " + bridge.statusLine
+            text: "  " + bridge.sourceBadge
+                  + (bridge.diagnosticVisible ? "   " + bridge.statusLine : "")
             color: "#9fb4c7"
             font.pixelSize: 13
             elide: Text.ElideRight

@@ -7,6 +7,44 @@ Column {
     id: panel
     spacing: 2
 
+    // Operator phase guide (prominent, above the range rows).
+    Rectangle {
+        width: 250
+        height: phase_guide.height + 10
+        radius: 5
+        color: "#102a18"
+        border.color: "#4fc3f7"
+        border.width: 1
+        opacity: 0.9
+
+        Text {
+            id: phase_guide
+            anchors.centerIn: parent
+            text: bridge.phaseGuideLine
+            color: "#bfe3ff"
+            font.pixelSize: 13
+            font.bold: true
+            horizontalAlignment: Text.AlignHCenter
+        }
+    }
+
+    // Boom angle + extension + leveling.
+    Rectangle {
+        width: 250
+        height: boom_lines.height + 10
+        radius: 5
+        color: "#000000"
+        opacity: 0.82
+
+        Text {
+            id: boom_lines
+            anchors.centerIn: parent
+            text: bridge.boomAngleLine + "\n" + bridge.boomExtensionLine + "\n" + bridge.levelLine
+            color: "#cfe3f5"
+            font.pixelSize: 12
+        }
+    }
+
     Rectangle {
         width: 250
         height: docking_rows.children.length * 20 + 48

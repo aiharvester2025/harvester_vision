@@ -21,6 +21,7 @@ from ..protocol_shim import ProtocolError, unpack_message
 JSON_CHANNELS = frozenset({
     'v1/range/docking',
     'v1/range/cutter',
+    'v1/boom/state',
     'v1/docking/trunk_estimate',
     'v1/calibration/status',
     'v1/system/status',
@@ -224,6 +225,10 @@ class TelemetryModel:
 
     def snapshot_trunk(self):
         return self._json_of('v1/docking/trunk_estimate')
+
+    def snapshot_boom(self):
+        """Return the decoded ``v1/boom/state`` payload (or None)."""
+        return self._json_of('v1/boom/state')
 
     def snapshot_calibration(self):
         payload = self._json_of('v1/calibration/status')

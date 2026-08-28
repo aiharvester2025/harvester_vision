@@ -60,6 +60,26 @@ class ProtocolTest(unittest.TestCase):
         with self.assertRaises(ProtocolError):
             unpack_message([b'v1/system/status'])
 
+    def test_boom_state_round_trip(self):
+        header = {
+            'schema_version': 1,
+            'source_mode': 'hardware',
+            'source_id': 'pi_plc',
+            'sequence': 1,
+            'frame_id': 'boom_link',
+            'acquisition_timestamp_ns': 1000000000,
+            'clock_domain': 'plc_rtc_utc',
+            'gateway_monotonic_ns': 2000000000,
+            'calibration_id': 'boom_provisional_v0',
+            'capabilities': {'boom.state': True},
+            'codec': 'json',
+        }
+        payload = b'{"phase":"BOOM_RAISE","boom_angle_deg":12.0}'
+        frames = pack_message('v1/boom/state', header, payload)
+        channel, _h, out = unpack_message(frames)
+        self.assertEqual(channel, 'v1/boom/state')
+        self.assertEqual(out, payload)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -37,10 +37,12 @@ if _QT_AVAILABLE:
         # --- QML-bound notifications ---------------------------------------
         view_changed = Signal()
         hud_visible_changed = Signal()
+        diagnostic_visible_changed = Signal()
         lidar_visible_changed = Signal()
         source_badge_changed = Signal()
         ranges_changed = Signal()
         trunk_changed = Signal()
+        boom_changed = Signal()
         calibration_changed = Signal()
         stream_rows_changed = Signal()
         annotation_changed = Signal()
@@ -71,6 +73,7 @@ if _QT_AVAILABLE:
                 if config.status_enabled else None)
             self._view = 'cutter'
             self._hud_visible = True
+            self._diagnostic_visible = True
             self._lidar_visible = True
             self._lidar_view_index = 0
             self._pointcloud_visible = True
@@ -122,6 +125,21 @@ if _QT_AVAILABLE:
 
         def _get_hud_visible(self) -> bool:
             return self._hud_visible
+
+        @Slot()
+        def toggle_diagnostic(self) -> None:
+            """Toggle the developer-diagnostic HUD layer (render-only).
+
+            Bound to the ``777`` + Enter key sequence in QML.  Independent of
+            the operator HUD (key ``3``): this only hides/shows the health
+            overlays (stream table, status line, timestamp line, stale ring).
+            No telemetry socket is written.
+            """
+            self._diagnostic_visible = not self._diagnostic_visible
+            self.diagnostic_visible_changed.emit()
+
+        def _get_diagnostic_visible(self) -> bool:
+            return self._diagnostic_visible
 
         @Slot()
         def toggle_lidar(self) -> None:
@@ -497,6 +515,7 @@ if _QT_AVAILABLE:
             self.source_badge_changed.emit()
             self.ranges_changed.emit()
             self.trunk_changed.emit()
+            self.boom_changed.emit()
             self.calibration_changed.emit()
             self.stream_rows_changed.emit()
             self.status_summary_changed.emit()
@@ -513,17 +532,6 @@ if _QT_AVAILABLE:
 
         def _get_source_mixed(self) -> bool:
             return self.model.is_mixed()
-
-        def _get_capabilities_line(self) -> str:
-            caps = self.model.latest_capabilities()
-            notable = [name for name in sorted(caps) if not caps[name]]
-            if 'target.world_fixed' in caps:
-                world = 'target.world_fixed={} '.format(
-                    caps['target.world_fixed'])
-            else:
-                world = ''
-            return world + 'off-capabilities: ' + (
-                ', '.join(notable) if notable else 'none')
 
         # -- freshness of the active camera ---------------------------------
         def _active_rgb_channel(self) -> str:
@@ -577,6 +585,39 @@ if _QT_AVAILABLE:
             if distance is None:
                 return 'cutter: INVALID'
             return 'cutter: {:.2f} m'.format(float(distance))
+
+        # -- boom / leveling / phase guide -------------------------------------
+        def _get_boom(self):
+            return self.model.snapshot_boom() or {}
+
+        def _get_boom_angle_line(self) -> str:
+            boom = self._get_boom()
+            angle = boom.get('boom_angle_deg')
+            if angle is None:
+                return 'boom angle: —'
+            return 'boom angle: {:+.1f}°'.format(float(angle))
+
+        def _get_boom_extension_line(self) -> str:
+            boom = self._get_boom()
+            ext = boom.get('boom_extension_m')
+            if ext is None:
+                return 'boom ext: —'
+            return 'boom ext: {:.2f} m'.format(float(ext))
+
+        def _get_level_line(self) -> str:
+            boom = self._get_boom()
+            roll = boom.get('platform_roll_deg')
+            pitch = boom.get('platform_pitch_deg')
+            if roll is None and pitch is None:
+                return 'level: —'
+            return 'level: roll {:+.2f}° pitch {:+.2f}°'.format(
+                float(roll or 0.0), float(pitch or 0.0))
+
+        def _get_phase_guide_line(self) -> str:
+            boom = self._get_boom()
+            phase = boom.get('phase') or 'NO DATA'
+            docked = bool(boom.get('docked', False))
+            return 'PHASE: {}'.format(phase) + ('  ✔ DOCKED' if docked else '')
 
         # -- trunk / calibration ---------------------------------------------
         def _get_trunk_line(self) -> str:
@@ -695,14 +736,14 @@ if _QT_AVAILABLE:
         view = Property(str, _get_view, set_view, notify=view_changed)
         hudVisible = Property(
             bool, _get_hud_visible, notify=hud_visible_changed)
+        diagnosticVisible = Property(
+            bool, _get_diagnostic_visible, notify=diagnostic_visible_changed)
         lidarVisible = Property(
             bool, _get_lidar_visible, notify=lidar_visible_changed)
         sourceBadge = Property(
             str, _get_source_badge, notify=source_badge_changed)
         sourceMixed = Property(
             bool, _get_source_mixed, notify=source_badge_changed)
-        capabilitiesLine = Property(
-            str, _get_capabilities_line, notify=source_badge_changed)
         activeCameraStale = Property(
             bool, _get_active_camera_stale, notify=frame_tick)
         activeTimestampLine = Property(
@@ -712,6 +753,11 @@ if _QT_AVAILABLE:
         cutterRangeLine = Property(
             str, _get_cutter_range_line, notify=ranges_changed)
         trunkLine = Property(str, _get_trunk_line, notify=trunk_changed)
+        boomAngleLine = Property(str, _get_boom_angle_line, notify=boom_changed)
+        boomExtensionLine = Property(
+            str, _get_boom_extension_line, notify=boom_changed)
+        levelLine = Property(str, _get_level_line, notify=boom_changed)
+        phaseGuideLine = Property(str, _get_phase_guide_line, notify=boom_changed)
         calibrationLine = Property(
             str, _get_calibration_line, notify=calibration_changed)
         streamRows = Property(

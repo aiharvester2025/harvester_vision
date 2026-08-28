@@ -27,6 +27,7 @@ CANONICAL_CHANNELS = frozenset({
     'v1/lidar/raw',
     'v1/range/docking',
     'v1/range/cutter',
+    'v1/boom/state',
     'v1/docking/trunk_estimate',
     'v1/calibration/status',
     'v1/system/status',

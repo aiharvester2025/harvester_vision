@@ -9,6 +9,7 @@ set -uo pipefail
 PATTERNS=(
   "canonical_zmq_publisher.main"
   "canonical_zmq_publisher.oak_capture"
+  "canonical_zmq_publisher.range_ingest"
   "harvester_dashboard.main"
 )
 

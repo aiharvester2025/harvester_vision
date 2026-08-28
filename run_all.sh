@@ -3,7 +3,8 @@
 #   1. canonical aggregator (PUB tcp://*:5590, REP tcp://*:5600, ingest 5570)
 #   2. docking OAK camera adapter (192.168.50.21) -> MJPEG 1080p (supervised)
 #   3. cutting OAK camera adapter (192.168.50.22) -> MJPEG 1080p (supervised)
-#   4. dashboard (system python, Jetson hardware decode)
+#   4. range/boom ingest (Pi PLC stream -> v1/range/docking + v1/boom/state)
+#   5. dashboard (system python, Jetson hardware decode)
 #
 # The two OAK adapters start with a delay between them: connecting two OAK
 # devices back-to-back triggers an intermittent "stack smashing" firmware
@@ -48,6 +49,9 @@ fi
 AGG_CMD="PYTHONPATH=canonical_zmq:. ${DAI_PY} -m canonical_zmq_publisher.main --ingest tcp://*:5570"
 DOCK_CMD="PYTHONPATH=canonical_zmq:. ${DAI_PY} -m canonical_zmq_publisher.oak_capture --camera-role docking_camera --ingest-endpoint tcp://127.0.0.1:5570 --supervise --codec ${CODEC} --ev-compensation 0 --brightness 0 --contrast 0 ${DEPTH_FLAG} ${IMU_FLAG}"
 CUT_CMD="PYTHONPATH=canonical_zmq:. ${DAI_PY} -m canonical_zmq_publisher.oak_capture --camera-role cutting_camera --ingest-endpoint tcp://127.0.0.1:5570 --supervise --codec ${CODEC} --ev-compensation 0 --brightness 0 --contrast 0 ${DEPTH_FLAG} ${IMU_FLAG}"
+# Range/boom ingest: SUB to the Pi PLC stream and PUSH canonical packets into
+# the aggregator.  The Pi address/port/topic are configurable for deployment.
+RANGE_CMD="PYTHONPATH=canonical_zmq:. ${DAI_PY} -m canonical_zmq_publisher.range_ingest --sensor-sub ${SENSOR_SUB:-tcp://192.168.50.40:5555} --topic ${SENSOR_TOPIC:-harvester.sensors.v1} --ingest-endpoint tcp://127.0.0.1:5570"
 # MALLOC_ARENA_MAX=2 caps glibc at two malloc arenas (default is cores*8=32 on
 # aarch64), which keeps the per-frame 6 MB numpy buffers from fragmenting the
 # process address space into hundreds of mmap'd arenas.  This is the dominant
@@ -65,9 +69,10 @@ if [[ "${1:-}" == "foreground" ]]; then
   log "aggregator:  ${AGG_CMD}"
   log "docking:     ${DOCK_CMD}"
   log "cutting:     ${CUT_CMD}"
+  log "range:       ${RANGE_CMD}"
   log "dashboard:   ${DASH_CMD}"
 
-  # Start the three background services, then run the dashboard in the
+  # Start the background services, then run the dashboard in the
   # foreground so Ctrl-C tears everything down.
   ( cd "$ROOT" && eval "$AGG_CMD" ) &
   AGG_PID=$!
@@ -77,8 +82,10 @@ if [[ "${1:-}" == "foreground" ]]; then
   sleep "$OAK_START_DELAY_S"
   ( cd "$ROOT" && eval "$CUT_CMD" ) &
   CUT_PID=$!
+  ( cd "$ROOT" && eval "$RANGE_CMD" ) &
+  RANGE_PID=$!
 
-  trap 'log "Stopping..."; kill $AGG_PID $DOCK_PID $CUT_PID 2>/dev/null || true; wait 2>/dev/null || true' EXIT INT TERM
+  trap 'log "Stopping..."; kill $AGG_PID $DOCK_PID $CUT_PID $RANGE_PID 2>/dev/null || true; wait 2>/dev/null || true' EXIT INT TERM
 
   cd "$ROOT"
   eval "$DASH_CMD"
@@ -93,9 +100,10 @@ else
   # Stagger the cutting camera: connect the second OAK after a delay so the
   # two devices never negotiate XLink back-to-back (firmware crash trigger).
   tmux new-window   -t harvest -n cutting "cd '$ROOT' && sleep $OAK_START_DELAY_S && $CUT_CMD"
+  tmux new-window   -t harvest -n range   "cd '$ROOT' && $RANGE_CMD"
   tmux new-window   -t harvest -n dash    "cd '$ROOT' && $DASH_CMD"
 
-  log "All 4 components started in tmux windows: agg, docking, cutting, dash."
+  log "All 5 components started in tmux windows: agg, docking, cutting, range, dash."
   log "Attach:        tmux attach -t harvest"
   log "Stop:          ./stop_all.sh"
 fi
