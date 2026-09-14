@@ -52,6 +52,9 @@ CUT_CMD="PYTHONPATH=canonical_zmq:. ${DAI_PY} -m canonical_zmq_publisher.oak_cap
 # Range/boom ingest: SUB to the Pi PLC stream and PUSH canonical packets into
 # the aggregator.  The Pi address/port/topic are configurable for deployment.
 RANGE_CMD="PYTHONPATH=canonical_zmq:. ${DAI_PY} -m canonical_zmq_publisher.range_ingest --sensor-sub ${SENSOR_SUB:-tcp://192.168.50.40:5555} --topic ${SENSOR_TOPIC:-harvester.sensors.v1} --ingest-endpoint tcp://127.0.0.1:5570"
+# MQTT ingest: SUB to the Mosquitto broker (Node-RED PLC stream on
+# harvester/sensors/v1) and PUSH canonical packets into the aggregator.
+MQTT_CMD="PYTHONPATH=canonical_zmq:. ${DAI_PY} -m canonical_zmq_publisher.mqtt_ingest --mqtt-host ${MQTT_HOST:-192.168.50.100} --mqtt-port ${MQTT_PORT:-1883} --topic ${MQTT_TOPIC:-harvester/sensors/v1} --ingest-endpoint tcp://127.0.0.1:5570"
 # MALLOC_ARENA_MAX=2 caps glibc at two malloc arenas (default is cores*8=32 on
 # aarch64), which keeps the per-frame 6 MB numpy buffers from fragmenting the
 # process address space into hundreds of mmap'd arenas.  This is the dominant
@@ -70,6 +73,7 @@ if [[ "${1:-}" == "foreground" ]]; then
   log "docking:     ${DOCK_CMD}"
   log "cutting:     ${CUT_CMD}"
   log "range:       ${RANGE_CMD}"
+  log "mqtt:        ${MQTT_CMD}"
   log "dashboard:   ${DASH_CMD}"
 
   # Start the background services, then run the dashboard in the
@@ -84,8 +88,10 @@ if [[ "${1:-}" == "foreground" ]]; then
   CUT_PID=$!
   ( cd "$ROOT" && eval "$RANGE_CMD" ) &
   RANGE_PID=$!
+  ( cd "$ROOT" && eval "$MQTT_CMD" ) &
+  MQTT_PID=$!
 
-  trap 'log "Stopping..."; kill $AGG_PID $DOCK_PID $CUT_PID $RANGE_PID 2>/dev/null || true; wait 2>/dev/null || true' EXIT INT TERM
+  trap 'log "Stopping..."; kill $AGG_PID $DOCK_PID $CUT_PID $RANGE_PID $MQTT_PID 2>/dev/null || true; wait 2>/dev/null || true' EXIT INT TERM
 
   cd "$ROOT"
   eval "$DASH_CMD"
@@ -101,9 +107,10 @@ else
   # two devices never negotiate XLink back-to-back (firmware crash trigger).
   tmux new-window   -t harvest -n cutting "cd '$ROOT' && sleep $OAK_START_DELAY_S && $CUT_CMD"
   tmux new-window   -t harvest -n range   "cd '$ROOT' && $RANGE_CMD"
+  tmux new-window   -t harvest -n mqtt    "cd '$ROOT' && $MQTT_CMD"
   tmux new-window   -t harvest -n dash    "cd '$ROOT' && $DASH_CMD"
 
-  log "All 5 components started in tmux windows: agg, docking, cutting, range, dash."
+  log "All 6 components started in tmux windows: agg, docking, cutting, range, mqtt, dash."
   log "Attach:        tmux attach -t harvest"
   log "Stop:          ./stop_all.sh"
 fi

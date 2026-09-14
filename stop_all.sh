@@ -10,6 +10,7 @@ PATTERNS=(
   "canonical_zmq_publisher.main"
   "canonical_zmq_publisher.oak_capture"
   "canonical_zmq_publisher.range_ingest"
+  "canonical_zmq_publisher.mqtt_ingest"
   "harvester_dashboard.main"
 )
 

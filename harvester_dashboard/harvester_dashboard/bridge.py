@@ -43,6 +43,7 @@ if _QT_AVAILABLE:
         ranges_changed = Signal()
         trunk_changed = Signal()
         boom_changed = Signal()
+        mqtt_sensors_changed = Signal()
         calibration_changed = Signal()
         stream_rows_changed = Signal()
         annotation_changed = Signal()
@@ -73,10 +74,10 @@ if _QT_AVAILABLE:
                 if config.status_enabled else None)
             self._view = 'cutter'
             self._hud_visible = True
-            self._diagnostic_visible = True
+            self._diagnostic_visible = False
             self._lidar_visible = True
             self._lidar_view_index = 0
-            self._pointcloud_visible = True
+            self._pointcloud_visible = False
             self._imu_enabled = True
             self._imu_reference = {'cutter': None, 'docking': None}
             self._imu_attitude = {'cutter': None, 'docking': None}
@@ -516,6 +517,7 @@ if _QT_AVAILABLE:
             self.ranges_changed.emit()
             self.trunk_changed.emit()
             self.boom_changed.emit()
+            self.mqtt_sensors_changed.emit()
             self.calibration_changed.emit()
             self.stream_rows_changed.emit()
             self.status_summary_changed.emit()
@@ -618,6 +620,72 @@ if _QT_AVAILABLE:
             phase = boom.get('phase') or 'NO DATA'
             docked = bool(boom.get('docked', False))
             return 'PHASE: {}'.format(phase) + ('  ✔ DOCKED' if docked else '')
+
+        # -- MQTT sensor values (maintenance/diagnostic layer) -----------------
+        # Renders every sensor value subscribed from the MQTT broker
+        # (harvester/sensors/v1), carried on v1/boom/state and
+        # v1/range/docking.  Each row is {label, value} with the value already
+        # formatted for display (or '—' when absent/invalid).
+        _MQTT_BOOM_FIELDS = (
+            ('phase', 'Run phase', None, False),
+            ('boom_angle_deg', 'Boom angle', '°', True),
+            ('boom_extension_m', 'Boom length', ' m', False),
+            ('slew_angle_deg', 'Slew angle', '°', True),
+            ('platform_tilt_x1_deg', 'Platform tilt X1', '°', True),
+            ('platform_tilt_y1_deg', 'Platform tilt Y1', '°', True),
+            ('primemover_tilt_x2_deg', 'Prime mover tilt X2', '°', True),
+            ('primemover_tilt_y2_deg', 'Prime mover tilt Y2', '°', True),
+        )
+
+        def _get_mqtt_sensor_rows(self):
+            """Build the raw MQTT sensor value rows for the diagnostic HUD.
+
+            The ``v1/boom/state`` payload carries the platform/primemover tilt,
+            boom angle/extension, and slew angle published by the mqtt_ingest
+            adapter; ``v1/range/docking`` carries the ultrasonic docking range.
+            Values are rendered verbatim (no unit conversion) so a developer can
+            inspect exactly what the MQTT source reported.
+            """
+            boom = self._get_boom()
+            rows = []
+            for key, label, unit, signed in self._MQTT_BOOM_FIELDS:
+                value = boom.get(key)
+                if key == 'phase':
+                    rows.append({'label': label,
+                                 'value': '—' if value is None else str(value)})
+                    continue
+                if value is None:
+                    rows.append({'label': label, 'value': '—'})
+                    continue
+                try:
+                    number = float(value)
+                except (TypeError, ValueError):
+                    rows.append({'label': label, 'value': '—'})
+                    continue
+                if signed:
+                    rows.append({'label': label,
+                                 'value': '{:+.3f}{}'.format(number, unit)})
+                else:
+                    rows.append({'label': label,
+                                 'value': '{:.3f}{}'.format(number, unit)})
+
+            # Ultrasonic docking range from v1/range/docking.
+            records, _cutter = self.model.snapshot_ranges()
+            ultrasonic = None
+            for record in (records or []):
+                if isinstance(record, dict) and record.get('telemetry_key') == 'ultrasonic_left':
+                    distance = record.get('distance_m')
+                    if distance is not None:
+                        try:
+                            ultrasonic = float(distance)
+                        except (TypeError, ValueError):
+                            ultrasonic = None
+                    break
+            rows.append({
+                'label': 'Ultrasonic left',
+                'value': '—' if ultrasonic is None else '{:.3f} m'.format(ultrasonic),
+            })
+            return rows
 
         # -- trunk / calibration ---------------------------------------------
         def _get_trunk_line(self) -> str:
@@ -758,6 +826,8 @@ if _QT_AVAILABLE:
             str, _get_boom_extension_line, notify=boom_changed)
         levelLine = Property(str, _get_level_line, notify=boom_changed)
         phaseGuideLine = Property(str, _get_phase_guide_line, notify=boom_changed)
+        mqttSensorRows = Property(
+            'QVariantList', _get_mqtt_sensor_rows, notify=mqtt_sensors_changed)
         calibrationLine = Property(
             str, _get_calibration_line, notify=calibration_changed)
         streamRows = Property(

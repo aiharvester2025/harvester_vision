@@ -148,6 +148,12 @@ bind the canonical `5590` themselves.
   `v1/range/docking` (the five docking ranges), `v1/boom/state` (boom angle,
   extension, leveling, phase), and `v1/docking/trunk_estimate`. Launched by
   `run_all.sh`.
+- `mqtt_ingest` — **implemented**. Subscribes to a Mosquitto MQTT broker
+  (`mqtt://192.168.50.100:1883`, topic `harvester/sensors/v1`) that carries the
+  Node-RED PLC sensor stream and PUSHes canonical packets for `v1/boom/state`
+  (boom angle/extension, platform/primemover tilt, slew angle) and
+  `v1/range/docking` (ultrasonic docking range). Launched by `run_all.sh`
+  (configurable via `MQTT_HOST`/`MQTT_PORT`/`MQTT_TOPIC`).
 - `cutter_range_ingest` — **deferred** (`v1/range/cutter`).
 
 Safety boundary (unchanged): observation-only. The aggregator never emits a

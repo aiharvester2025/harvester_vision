@@ -1,0 +1,5 @@
+interface:
+  display_name: "Harvester Sensor Simulation"
+  short_description: "Manual-only skill for building ZeroMQ sensor/PLC simulation publishers with state machines and ray-cast geometry."
+policy:
+  allow_implicit_invocation: false

@@ -1,0 +1,5 @@
+interface:
+  display_name: "Harvester Dashboard HUD"
+  short_description: "Manual-only skill for extending the harvester_vision Qt Quick dashboard HUD (model, bridge, QML, toggles)."
+policy:
+  allow_implicit_invocation: false

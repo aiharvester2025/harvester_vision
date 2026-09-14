@@ -1,0 +1,5 @@
+interface:
+  display_name: "Harvester Canonical ZMQ"
+  short_description: "Manual-only skill for extending the harvester_vision canonical ZeroMQ telemetry bus (channels, adapters, aggregator)."
+policy:
+  allow_implicit_invocation: false

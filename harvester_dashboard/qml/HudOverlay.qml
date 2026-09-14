@@ -55,6 +55,57 @@ Item {
                 horizontalAlignment: Text.AlignRight
             }
         }
+
+        // MQTT sensor values (maintenance/diagnostic layer, gated on 777+Enter).
+        Rectangle {
+            visible: bridge.diagnosticVisible
+            width: 260
+            height: mqtt_header.height + mqtt_rows.height + 18
+            radius: 5
+            color: "#101418"
+            border.color: "#4fc3f7"
+            border.width: 1
+            opacity: panel_opacity
+            clip: true
+
+            Text {
+                id: mqtt_header
+                anchors.top: parent.top
+                anchors.left: parent.left
+                anchors.margins: 6
+                text: "MQTT sensors (harvester/sensors/v1)"
+                color: "#bfe3ff"
+                font.pixelSize: 11
+                font.bold: true
+            }
+
+            Column {
+                id: mqtt_rows
+                anchors.top: mqtt_header.bottom
+                anchors.topMargin: 4
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.margins: 6
+                spacing: 1
+
+                Repeater {
+                    model: bridge.mqttSensorRows
+                    delegate: Text {
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        text: modelData.label
+                        color: "#9fb4c7"
+                        font.pixelSize: 11
+                        Text {
+                            anchors.right: parent.right
+                            text: modelData.value
+                            color: "#a8d08d"
+                            font.pixelSize: 11
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // Bottom: stream errors panel (collapsible rows per channel).

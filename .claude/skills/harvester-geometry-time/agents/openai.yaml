@@ -1,0 +1,5 @@
+interface:
+  display_name: "Harvester Geometry & Time"
+  short_description: "Manual-only skill for the harvester_vision coordinate frames, calibration, LiDAR leveling/kinematics, and time-sync foundations."
+policy:
+  allow_implicit_invocation: false

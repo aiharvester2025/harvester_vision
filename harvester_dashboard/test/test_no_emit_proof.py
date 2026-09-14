@@ -87,7 +87,7 @@ class NoEmitProofTest(unittest.TestCase):
             bridge.toggle_hud()
         if not bridge.lidarVisible:
             bridge.toggle_lidar()
-        if not bridge.diagnosticVisible:
+        if bridge.diagnosticVisible:
             bridge.toggle_diagnostic()
 
     def test_diagnostic_toggle_flips_property(self):
@@ -114,6 +114,61 @@ class NoEmitProofTest(unittest.TestCase):
         self.assertNotEqual(bridge.diagnosticVisible, initial)
         bridge.toggle_diagnostic()
         self.assertEqual(bridge.diagnosticVisible, initial)
+
+    def test_mqtt_sensor_rows_render_boom_and_range(self):
+        try:
+            from PySide2.QtGui import QGuiApplication
+            from harvester_dashboard.bridge import DashboardBridge
+            from harvester_dashboard.config import DashboardConfig
+            from harvester_dashboard.model.telemetry_model import TelemetryModel
+            from harvester_dashboard.model.target_model import AnnotationState
+        except ImportError:
+            self.skipTest('PySide2 unavailable')
+
+        app = QGuiApplication.instance() or QGuiApplication(['mqtt-rows-test'])
+        model = TelemetryModel()
+        annotation = AnnotationState()
+        config = DashboardConfig(
+            pub_endpoint='tcp://127.0.0.1:55901',
+            status_endpoint='',
+            annotation_endpoint='',
+        )
+        bridge = DashboardBridge(config, model, annotation)
+
+        # Empty state: all rows present with '—' placeholders.
+        rows = bridge.mqttSensorRows
+        labels = [r['label'] for r in rows]
+        self.assertIn('Boom angle', labels)
+        self.assertIn('Ultrasonic left', labels)
+        self.assertTrue(all(r['value'] == '—' for r in rows))
+
+        # Feed a canonical boom payload (as produced by mqtt_ingest).
+        from helpers import json_packet
+        boom = {
+            'phase': 'RUN',
+            'boom_angle_deg': 0.101,
+            'boom_extension_m': 0.0025,
+            'slew_angle_deg': 12.5,
+            'platform_tilt_x1_deg': 0.296,
+            'platform_tilt_y1_deg': -0.127,
+            'primemover_tilt_x2_deg': -36.41,
+            'primemover_tilt_y2_deg': -43.10,
+            'platform_roll_deg': 0.296,
+            'platform_pitch_deg': -0.127,
+            'docked': False,
+        }
+        model.ingest_frames(json_packet('v1/boom/state', boom, sequence=1))
+        model.ingest_frames(json_packet('v1/range/docking', [
+            {'telemetry_key': 'ultrasonic_left', 'distance_m': 4.92,
+             'valid': True},
+        ], sequence=1))
+
+        rows = bridge.mqttSensorRows
+        by_label = {r['label']: r['value'] for r in rows}
+        self.assertEqual(by_label['Run phase'], 'RUN')
+        self.assertIn('0.101', by_label['Boom angle'])
+        self.assertIn('4.920', by_label['Ultrasonic left'])
+        self.assertNotEqual(by_label['Prime mover tilt X2'], '—')
 
     def test_annotation_publisher_disabled_has_no_socket(self):
         publisher = AnnotationPublisher('')   # default disabled

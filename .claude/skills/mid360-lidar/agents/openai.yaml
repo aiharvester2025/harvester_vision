@@ -1,0 +1,5 @@
+interface:
+  display_name: "Mid-360S LiDAR"
+  short_description: "Manual-only skill for the Livox Mid-360(S) LiDAR: specs, downloads, SDK2/ROS integration, and point cloud formats."
+policy:
+  allow_implicit_invocation: false
