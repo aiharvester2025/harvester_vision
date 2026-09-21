@@ -50,6 +50,7 @@ def main(argv=None) -> int:
     from .model.target_model import AnnotationState
     from .bridge import DashboardBridge
     from .image_provider import FrameImageProvider
+    from .hud_config import load_hud_config
     from .zmq_source import TelemetrySource
 
     model = TelemetryModel()
@@ -57,7 +58,8 @@ def main(argv=None) -> int:
     from .annotation_publisher import AnnotationPublisher
     annotation_publisher = AnnotationPublisher(config.annotation_endpoint)
     bridge = DashboardBridge(config, model, annotation,
-                             annotation_publisher=annotation_publisher)
+                             annotation_publisher=annotation_publisher,
+                             hud_config=load_hud_config(config.hud_config_path))
     provider = FrameImageProvider()
     source = TelemetrySource(config, model)
     source.on_frame = _make_frame_sink(bridge, provider)

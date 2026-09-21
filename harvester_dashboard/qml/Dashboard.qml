@@ -51,8 +51,8 @@ Item {
             key_buffer_timer.stop();
         }
 
-        if (event.key === Qt.Key_1) { bridge.set_view("cutter"); event.accepted = true; }
-        else if (event.key === Qt.Key_2) { bridge.set_view("docking"); event.accepted = true; }
+        if (event.key === Qt.Key_1) { bridge.select_cutter_view(); event.accepted = true; }
+        else if (event.key === Qt.Key_2) { bridge.toggle_operator_huds(); event.accepted = true; }
         else if (event.key === Qt.Key_3) { bridge.toggle_hud(); event.accepted = true; }
         else if (event.key === Qt.Key_4) { bridge.toggle_lidar(); event.accepted = true; }
         else if (event.key === Qt.Key_5) { bridge.cycle_lidar_view(); event.accepted = true; }
@@ -74,7 +74,7 @@ Item {
         Repeater {
             model: [
                 { label: "1 Cutter", action: "cutter" },
-                { label: "2 Docking", action: "docking" },
+                { label: "2 Boom/Dock", action: "boomdock" },
                 { label: "3 HUD", action: "hud" },
                 { label: "4 LiDAR", action: "lidar" },
                 { label: "5 View", action: "lidarview" },
@@ -89,7 +89,7 @@ Item {
                 color: touch.pressed ? "#3a4a5a" : "#22303f"
                 border.color: {
                     if (modelData.action === "cutter") return bridge.view === "cutter" ? "#4fc3f7" : "#2a3a4a";
-                    if (modelData.action === "docking") return bridge.view === "docking" ? "#4fc3f7" : "#2a3a4a";
+                    if (modelData.action === "boomdock") return (bridge.operatorHudsVisible && bridge.view !== "cutter") ? "#4fc3f7" : "#2a3a4a";
                     if (modelData.action === "pointcloud") return bridge.pointcloudVisible ? "#4fc3f7" : "#2a3a4a";
                     if (modelData.action === "imu") return bridge.imuEnabled ? "#4fc3f7" : "#2a3a4a";
                     if (modelData.action === "lidarview") return "#2a3a4a";
@@ -107,8 +107,8 @@ Item {
                     id: touch
                     anchors.fill: parent
                     onClicked: {
-                        if (modelData.action === "cutter") bridge.set_view("cutter");
-                        else if (modelData.action === "docking") bridge.set_view("docking");
+                        if (modelData.action === "cutter") bridge.select_cutter_view();
+                        else if (modelData.action === "boomdock") bridge.toggle_operator_huds();
                         else if (modelData.action === "hud") bridge.toggle_hud();
                         else if (modelData.action === "lidar") bridge.toggle_lidar();
                         else if (modelData.action === "lidarview") bridge.cycle_lidar_view();

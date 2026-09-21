@@ -70,7 +70,9 @@ class NoEmitProofTest(unittest.TestCase):
         for _ in range(20):
             bridge.set_view('docking')
             bridge.set_view('cutter')
+            bridge.select_cutter_view()
             bridge.toggle_hud()
+            bridge.toggle_operator_huds()
             bridge.toggle_lidar()
             bridge.toggle_diagnostic()
             for _ in range(5):
@@ -85,6 +87,8 @@ class NoEmitProofTest(unittest.TestCase):
         # Restore toggles to defaults for other tests in this process.
         if not bridge.hudVisible:
             bridge.toggle_hud()
+        if not bridge.operatorHudsVisible:
+            bridge.toggle_operator_huds()
         if not bridge.lidarVisible:
             bridge.toggle_lidar()
         if bridge.diagnosticVisible:
@@ -139,7 +143,9 @@ class NoEmitProofTest(unittest.TestCase):
         rows = bridge.mqttSensorRows
         labels = [r['label'] for r in rows]
         self.assertIn('Boom angle', labels)
-        self.assertIn('Ultrasonic left', labels)
+        self.assertIn('Laser 45° left', labels)
+        self.assertIn('Laser center', labels)
+        self.assertIn('Laser 45° right', labels)
         self.assertTrue(all(r['value'] == '—' for r in rows))
 
         # Feed a canonical boom payload (as produced by mqtt_ingest).
@@ -159,7 +165,9 @@ class NoEmitProofTest(unittest.TestCase):
         }
         model.ingest_frames(json_packet('v1/boom/state', boom, sequence=1))
         model.ingest_frames(json_packet('v1/range/docking', [
-            {'telemetry_key': 'ultrasonic_left', 'distance_m': 4.92,
+            {'telemetry_key': 'diagonal_left_45deg', 'distance_m': 4.92,
+             'valid': True},
+            {'telemetry_key': 'center_line', 'distance_m': 5.15,
              'valid': True},
         ], sequence=1))
 
@@ -167,7 +175,9 @@ class NoEmitProofTest(unittest.TestCase):
         by_label = {r['label']: r['value'] for r in rows}
         self.assertEqual(by_label['Run phase'], 'RUN')
         self.assertIn('0.101', by_label['Boom angle'])
-        self.assertIn('4.920', by_label['Ultrasonic left'])
+        self.assertIn('4.920', by_label['Laser 45° left'])
+        self.assertIn('5.150', by_label['Laser center'])
+        self.assertEqual(by_label['Laser 45° right'], '—')
         self.assertNotEqual(by_label['Prime mover tilt X2'], '—')
 
     def test_annotation_publisher_disabled_has_no_socket(self):

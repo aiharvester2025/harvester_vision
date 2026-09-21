@@ -25,12 +25,12 @@ Item {
         }
     }
 
-    // Left panel: docking ranges + cutter range.
+    // Operator sensor HUDs (Boom bottom-right, Docking Ranges bottom-left,
+    // Cutter Range on the cutter view). Each panel self-anchors from the admin
+    // layout, so this host fills the overlay and gates nothing itself.
     SensorPanel {
         id: sensor_panel
-        anchors.left: parent.left
-        anchors.top: parent.top
-        anchors.margins: 8
+        anchors.fill: parent
     }
 
     // Right panel: trunk + calibration (operator-facing only).

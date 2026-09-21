@@ -110,17 +110,37 @@ def main() -> int:
         app.sendEvent(view.rootObject(), QKeyEvent(QEvent.KeyRelease, k, Qt.NoModifier))
         app.processEvents()
 
-    # 1. cutter view visible with synthetic image
-    grab('cutter')
-    check('cutter view active', bridge.view == 'cutter')
-    check('camera info ingested', model.snapshot_camera_info('cutter') is not None)
-
-    # 2. key 2 -> docking (render-only)
-    key(Qt.Key_2)
+    # 1. docking view is the boot default, with the operator HUDs shown
     grab('docking')
-    check('key 2 switched to docking', bridge.view == 'docking')
+    check('docking view active by default', bridge.view == 'docking')
+    check('operator HUDs visible by default', bridge.operatorHudsVisible is True)
+
+    # 2. key 2 toggles the boom/docking HUDs; showing from cutter forces docking
+    key(Qt.Key_2)
+    check('key 2 hid the operator HUDs', bridge.operatorHudsVisible is False)
+    key(Qt.Key_2)
+    check('key 2 showed the operator HUDs', bridge.operatorHudsVisible is True)
+    check('showing operator HUDs selects docking', bridge.view == 'docking')
+
+    # key 1 -> cutter view, showing only the cutter HUD
     key(Qt.Key_1)
-    check('key 1 switched back to cutter', bridge.view == 'cutter')
+    grab('cutter')
+    check('key 1 switched to cutter', bridge.view == 'cutter')
+    check('camera info ingested', model.snapshot_camera_info('cutter') is not None)
+    check('cutter HUD shown on cutter view', bridge.cutterHudVisible is True)
+    # key 1 on the cutter view toggles the cutter HUD (camera stays on cutter)
+    key(Qt.Key_1)
+    check('key 1 hid the cutter HUD', bridge.cutterHudVisible is False)
+    check('hiding cutter HUD leaves cutter view', bridge.view == 'cutter')
+    key(Qt.Key_1)
+    check('key 1 showed the cutter HUD', bridge.cutterHudVisible is True)
+    # key 2 on the cutter view always returns to docking and shows boom/docking
+    key(Qt.Key_2)
+    check('key 2 from cutter -> docking + HUDs',
+          bridge.operatorHudsVisible is True and bridge.view == 'docking')
+    # back to cutter for the annotation/stale steps below
+    key(Qt.Key_1)
+    check('key 1 active for annotation steps', bridge.view == 'cutter')
 
     # 3. annotate a valid-depth pixel (image 64x48 mapped into 1280x800)
     # image displayed area: width/height scaled preserving aspect; click center

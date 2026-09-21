@@ -24,6 +24,10 @@ class DashboardConfig:
     annotation_depth_window_px: int = 3
     pointcloud_max_points: int = 2000
     qml_directory: Optional[str] = None
+    # Optional path to a JSON file overriding HUD panel layout/captions/sizes.
+    # None falls back to the built-in defaults (or the shipped hud_config.json
+    # when the launcher passes it explicitly).
+    hud_config_path: Optional[str] = None
 
     @property
     def status_enabled(self) -> bool:
@@ -56,6 +60,8 @@ class DashboardConfig:
                             help='maximum LiDAR points kept for the inset scatter')
         parser.add_argument('--pointcloud-max-points', type=int, default=2000,
                             help='maximum depth-unprojected points kept for the camera point-cloud panel')
+        parser.add_argument('--hud-config', default=None,
+                            help='path to a JSON file overriding HUD panel layout/captions/sizes')
         known, _unknown = parser.parse_known_args(args)
         return cls(
             pub_endpoint=known.pub,
@@ -68,4 +74,5 @@ class DashboardConfig:
             lidar_max_points=max(1, known.lidar_max_points),
             qml_directory=known.qml_directory if hasattr(known, 'qml_directory') else None,
             pointcloud_max_points=max(1, known.pointcloud_max_points),
+            hud_config_path=(known.hud_config or None),
         )

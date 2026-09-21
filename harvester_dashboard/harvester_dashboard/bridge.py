@@ -24,6 +24,7 @@ except ImportError:  # pragma: no cover - headless pure-python tests
     QObject = object
 
 from .config import DashboardConfig
+from .hud_config import HudLayoutConfig, default_hud_layout
 from .model.telemetry_model import TelemetryModel
 from .model.target_model import AnnotationState
 from .status_client import StatusClient
@@ -37,6 +38,8 @@ if _QT_AVAILABLE:
         # --- QML-bound notifications ---------------------------------------
         view_changed = Signal()
         hud_visible_changed = Signal()
+        operator_huds_visible_changed = Signal()
+        cutter_hud_visible_changed = Signal()
         diagnostic_visible_changed = Signal()
         lidar_visible_changed = Signal()
         source_badge_changed = Signal()
@@ -62,18 +65,31 @@ if _QT_AVAILABLE:
 
         def __init__(self, config: DashboardConfig, model: TelemetryModel,
                      annotation: AnnotationState, annotation_publisher=None,
+                     hud_config: Optional[HudLayoutConfig] = None,
                      parent=None):
             super().__init__(parent)
             self.config = config
             self.model = model
             self.annotation = annotation
             self.annotation_publisher = annotation_publisher
+            self.hud_config = hud_config or default_hud_layout()
             self.status_client = (
                 StatusClient(config.status_endpoint,
                              timeout_ms=self.STATUS_TIMEOUT_MS)
                 if config.status_enabled else None)
-            self._view = 'cutter'
+            self._view = 'docking'
             self._hud_visible = True
+            # Operator HUDs are shown at startup (key 2 toggles them).  Each
+            # panel additionally gates on its own ``visible`` config, and the
+            # key-2 toggle stays on unless the admin disabled every panel.
+            self._operator_huds_visible = any((
+                self.hud_config.boom.visible,
+                self.hud_config.docking.visible,
+                self.hud_config.cutter_range.visible,
+            ))
+            # The Cutter Range HUD is shown while the cutter camera is active;
+            # key 1 toggles it when already on the cutter view.
+            self._cutter_hud_visible = self.hud_config.cutter_range.visible
             self._diagnostic_visible = False
             self._lidar_visible = True
             self._lidar_view_index = 0
@@ -126,6 +142,57 @@ if _QT_AVAILABLE:
 
         def _get_hud_visible(self) -> bool:
             return self._hud_visible
+
+        @Slot()
+        def toggle_operator_huds(self) -> None:
+            """Handle key ``2``: the Boom + Docking HUDs.
+
+            While the cutter camera is active, key 2 always returns to the
+            docking camera, hides the Cutter Range HUD, and shows the Boom +
+            Docking HUDs.  Otherwise it toggles the Boom + Docking HUDs.
+            Render-only: this only flips view state, it never writes to a
+            telemetry socket.
+            """
+            if self._view == 'cutter':
+                # Returning to docking: cutter HUD hides, boom/docking show.
+                self.set_view('docking')
+                self._set_cutter_hud_visible(True)
+                self._set_operator_huds_visible(True)
+                return
+            self._set_operator_huds_visible(not self._operator_huds_visible)
+
+        def _set_operator_huds_visible(self, visible: bool) -> None:
+            if self._operator_huds_visible == visible:
+                return
+            self._operator_huds_visible = visible
+            self.operator_huds_visible_changed.emit()
+
+        def _get_operator_huds_visible(self) -> bool:
+            return self._operator_huds_visible
+
+        @Slot()
+        def select_cutter_view(self) -> None:
+            """Handle key ``1``: the cutter camera and its range HUD.
+
+            From another view this switches to the cutter camera and shows the
+            Cutter Range HUD (the Boom/Docking HUDs hide because they gate on
+            the docking view).  Pressed again on the cutter view it hides/shows
+            the Cutter Range HUD.  Render-only.
+            """
+            if self._view != 'cutter':
+                self.set_view('cutter')
+                self._set_cutter_hud_visible(True)
+                return
+            self._set_cutter_hud_visible(not self._cutter_hud_visible)
+
+        def _set_cutter_hud_visible(self, visible: bool) -> None:
+            if self._cutter_hud_visible == visible:
+                return
+            self._cutter_hud_visible = visible
+            self.cutter_hud_visible_changed.emit()
+
+        def _get_cutter_hud_visible(self) -> bool:
+            return self._cutter_hud_visible
 
         @Slot()
         def toggle_diagnostic(self) -> None:
@@ -565,55 +632,112 @@ if _QT_AVAILABLE:
             return '—' if age is None else '{:.1f}s'.format(age)
 
         # -- ranges -----------------------------------------------------------
+        # Docking range rows in the same {key, label, value, valid} shape the
+        # Boom HUD uses, so the shared SensorHudPanel can render both.  Values
+        # come from v1/range/docking (the PLC MQTT laser distances).
+        _DOCKING_RANGE_LABELS = {
+            'center_line': 'Center',
+            'diagonal_left_45deg': '45° Left',
+            'diagonal_right_45deg': '45° Right',
+            'c_channel_left': 'Side Left',
+            'c_channel_right': 'Side Right',
+        }
+
         def _get_docking_range_rows(self):
             records, _cutter = self.model.snapshot_ranges()
             rows = []
             for record in (records or []):
                 if not isinstance(record, dict):
                     continue
+                key = str(record.get('telemetry_key', '?'))
+                distance = record.get('distance_m')
+                valid = bool(record.get('valid', False)) and distance is not None
+                if distance is None:
+                    value = '—'
+                else:
+                    try:
+                        value = '{:.3f} m'.format(float(distance))
+                    except (TypeError, ValueError):
+                        value = '—'
+                        valid = False
                 rows.append({
-                    'key': str(record.get('telemetry_key', '?')),
-                    'distance': (None if record.get('distance_m') is None
-                                 else float(record['distance_m'])),
-                    'valid': bool(record.get('valid', False)),
+                    'key': key,
+                    'label': self._DOCKING_RANGE_LABELS.get(key, key),
+                    'value': value,
+                    'valid': valid,
                 })
             return rows
-
-        def _get_cutter_range_line(self) -> str:
-            _records, cutter = self.model.snapshot_ranges()
-            if not cutter:
-                return 'cutter: —'
-            distance = cutter.get('distance_m')
-            if distance is None:
-                return 'cutter: INVALID'
-            return 'cutter: {:.2f} m'.format(float(distance))
 
         # -- boom / leveling / phase guide -------------------------------------
         def _get_boom(self):
             return self.model.snapshot_boom() or {}
 
-        def _get_boom_angle_line(self) -> str:
-            boom = self._get_boom()
-            angle = boom.get('boom_angle_deg')
-            if angle is None:
-                return 'boom angle: —'
-            return 'boom angle: {:+.1f}°'.format(float(angle))
+        def _get_boom_rows(self):
+            """Structured boom rows {key, label, value, valid} for the Boom HUD.
 
-        def _get_boom_extension_line(self) -> str:
+            Values come from the PLC MQTT subscriber, carried on
+            ``v1/boom/state`` (see ``mqtt_ingest.map_boom_state``).
+            """
             boom = self._get_boom()
-            ext = boom.get('boom_extension_m')
-            if ext is None:
-                return 'boom ext: —'
-            return 'boom ext: {:.2f} m'.format(float(ext))
+            rows = []
 
-        def _get_level_line(self) -> str:
-            boom = self._get_boom()
-            roll = boom.get('platform_roll_deg')
-            pitch = boom.get('platform_pitch_deg')
-            if roll is None and pitch is None:
-                return 'level: —'
-            return 'level: roll {:+.2f}° pitch {:+.2f}°'.format(
-                float(roll or 0.0), float(pitch or 0.0))
+            def _angle(key: str, label: str):
+                value = boom.get(key)
+                if value is None:
+                    rows.append({'key': key, 'label': label,
+                                 'value': '—', 'valid': False})
+                    return
+                try:
+                    rows.append({'key': key, 'label': label,
+                                 'value': '{:+.2f}°'.format(float(value)),
+                                 'valid': True})
+                except (TypeError, ValueError):
+                    rows.append({'key': key, 'label': label,
+                                 'value': '—', 'valid': False})
+
+            # Boom angle, boom length, slew angle.
+            _angle('boom_angle_deg', 'Boom Angle')
+
+            length = boom.get('boom_extension_m')
+            if length is None:
+                rows.append({'key': 'boom_extension_m', 'label': 'Boom Length',
+                             'value': '—', 'valid': False})
+            else:
+                try:
+                    rows.append({'key': 'boom_extension_m', 'label': 'Boom Length',
+                                 'value': '{:.3f} m'.format(float(length)),
+                                 'valid': True})
+                except (TypeError, ValueError):
+                    rows.append({'key': 'boom_extension_m', 'label': 'Boom Length',
+                                 'value': '—', 'valid': False})
+
+            _angle('slew_angle_deg', 'Slew Angle')
+
+            # Platform tilt X1/Y1 and prime mover tilt X2/Y2.
+            _angle('platform_tilt_x1_deg', 'Platform Tilt X1')
+            _angle('platform_tilt_y1_deg', 'Platform Tilt Y1')
+            _angle('primemover_tilt_x2_deg', 'Prime Mover Tilt X2')
+            _angle('primemover_tilt_y2_deg', 'Prime Mover Tilt Y2')
+            return rows
+
+        def _get_cutter_range_row(self):
+            """Single-row cutter range data for the Cutter Range HUD."""
+            _records, cutter = self.model.snapshot_ranges()
+            if not cutter:
+                return [{'key': 'cutter_range', 'label': 'Cutter',
+                         'value': '—', 'valid': False}]
+            distance = cutter.get('distance_m')
+            return [{
+                'key': 'cutter_range',
+                'label': 'Cutter',
+                'value': ('INVALID' if distance is None
+                          else '{:.2f} m'.format(float(distance))),
+                'valid': distance is not None,
+            }]
+
+        def _get_hud_layout(self):
+            """QVariantMap of the admin HUD layout for QML."""
+            return self.hud_config.to_qml()
 
         def _get_phase_guide_line(self) -> str:
             boom = self._get_boom()
@@ -642,7 +766,8 @@ if _QT_AVAILABLE:
 
             The ``v1/boom/state`` payload carries the platform/primemover tilt,
             boom angle/extension, and slew angle published by the mqtt_ingest
-            adapter; ``v1/range/docking`` carries the ultrasonic docking range.
+            adapter; ``v1/range/docking`` carries the three laser docking
+            distances (45° left, center, 45° right).
             Values are rendered verbatim (no unit conversion) so a developer can
             inspect exactly what the MQTT source reported.
             """
@@ -669,22 +794,25 @@ if _QT_AVAILABLE:
                     rows.append({'label': label,
                                  'value': '{:.3f}{}'.format(number, unit)})
 
-            # Ultrasonic docking range from v1/range/docking.
+            # Laser docking ranges from v1/range/docking.
             records, _cutter = self.model.snapshot_ranges()
-            ultrasonic = None
+            distances = {}
             for record in (records or []):
-                if isinstance(record, dict) and record.get('telemetry_key') == 'ultrasonic_left':
+                if isinstance(record, dict):
                     distance = record.get('distance_m')
                     if distance is not None:
                         try:
-                            ultrasonic = float(distance)
+                            distances[record.get('telemetry_key')] = float(distance)
                         except (TypeError, ValueError):
-                            ultrasonic = None
-                    break
-            rows.append({
-                'label': 'Ultrasonic left',
-                'value': '—' if ultrasonic is None else '{:.3f} m'.format(ultrasonic),
-            })
+                            pass
+            for key, label in (('diagonal_left_45deg', 'Laser 45° left'),
+                               ('center_line', 'Laser center'),
+                               ('diagonal_right_45deg', 'Laser 45° right')):
+                value = distances.get(key)
+                rows.append({
+                    'label': label,
+                    'value': '—' if value is None else '{:.3f} m'.format(value),
+                })
             return rows
 
         # -- trunk / calibration ---------------------------------------------
@@ -804,6 +932,14 @@ if _QT_AVAILABLE:
         view = Property(str, _get_view, set_view, notify=view_changed)
         hudVisible = Property(
             bool, _get_hud_visible, notify=hud_visible_changed)
+        operatorHudsVisible = Property(
+            bool, _get_operator_huds_visible,
+            notify=operator_huds_visible_changed)
+        cutterHudVisible = Property(
+            bool, _get_cutter_hud_visible,
+            notify=cutter_hud_visible_changed)
+        hudLayout = Property(
+            'QVariantMap', _get_hud_layout, constant=True)
         diagnosticVisible = Property(
             bool, _get_diagnostic_visible, notify=diagnostic_visible_changed)
         lidarVisible = Property(
@@ -818,13 +954,11 @@ if _QT_AVAILABLE:
             str, _get_active_timestamp_line, notify=frame_tick)
         dockingRangeRows = Property(
             'QVariantList', _get_docking_range_rows, notify=ranges_changed)
-        cutterRangeLine = Property(
-            str, _get_cutter_range_line, notify=ranges_changed)
         trunkLine = Property(str, _get_trunk_line, notify=trunk_changed)
-        boomAngleLine = Property(str, _get_boom_angle_line, notify=boom_changed)
-        boomExtensionLine = Property(
-            str, _get_boom_extension_line, notify=boom_changed)
-        levelLine = Property(str, _get_level_line, notify=boom_changed)
+        boomRows = Property(
+            'QVariantList', _get_boom_rows, notify=boom_changed)
+        cutterRangeRow = Property(
+            'QVariantList', _get_cutter_range_row, notify=ranges_changed)
         phaseGuideLine = Property(str, _get_phase_guide_line, notify=boom_changed)
         mqttSensorRows = Property(
             'QVariantList', _get_mqtt_sensor_rows, notify=mqtt_sensors_changed)

@@ -1,0 +1,54 @@
+{
+  "boom": {
+    "visible": true,
+    "anchor": "bottom-right",
+    "caption": "BOOM",
+    "width": 520,
+    "height": 0,
+    "value_font_px": 46,
+    "caption_font_px": 30,
+    "margin_px": 12,
+    "opacity": 0.85,
+    "rows": {
+      "boom_angle_deg": "Boom Angle",
+      "boom_extension_m": "Boom Length",
+      "slew_angle_deg": "Slew Angle",
+      "platform_tilt_x1_deg": "Platform Tilt X1",
+      "platform_tilt_y1_deg": "Platform Tilt Y1",
+      "primemover_tilt_x2_deg": "Prime Mover Tilt X2",
+      "primemover_tilt_y2_deg": "Prime Mover Tilt Y2"
+    }
+  },
+  "docking": {
+    "visible": true,
+    "anchor": "bottom-left",
+    "caption": "DOCKING RANGES",
+    "width": 560,
+    "height": 0,
+    "value_font_px": 46,
+    "caption_font_px": 30,
+    "margin_px": 12,
+    "opacity": 0.85,
+    "rows": {
+      "center_line": "Center",
+      "diagonal_left_45deg": "45\u00b0 Left",
+      "diagonal_right_45deg": "45\u00b0 Right",
+      "c_channel_left": "Side Left",
+      "c_channel_right": "Side Right"
+    }
+  },
+  "cutter_range": {
+    "visible": true,
+    "anchor": "bottom-left",
+    "caption": "CUTTER RANGE",
+    "width": 460,
+    "height": 0,
+    "value_font_px": 46,
+    "caption_font_px": 30,
+    "margin_px": 12,
+    "opacity": 0.85,
+    "rows": {
+      "cutter_range": "Cutter"
+    }
+  }
+}

@@ -1,98 +1,76 @@
-// Five docking ranges + cutter range rows.
-// Renders whatever telemetry_key strings arrive (Orin ingest normalizes
-// the Raspberry Pi keys; the dashboard does not hard-code them).
+// Operator HUD panels: Boom (bottom-right), Docking Ranges (bottom-left) and
+// Cutter Range (cutter view only).  Each panel's anchor, captions, size and
+// fonts come from the admin layout in bridge.hudLayout.
+//
+// All panels are gated on bridge.operatorHudsVisible (key 2). The docking and
+// boom panels are additionally gated on their per-panel `visible` config; the
+// cutter panel only shows while the cutter camera is the active view.
+//
+// Each panel is hosted in a Loader (the positioned item); the anchor is applied
+// to the Loader, the loaded SensorHudPanel keeps its own size.
 import QtQuick 2.12
 
-Column {
-    id: panel
-    spacing: 2
+Item {
+    id: root
 
-    // Operator phase guide (prominent, above the range rows).
-    Rectangle {
-        width: 250
-        height: phase_guide.height + 10
-        radius: 5
-        color: "#102a18"
-        border.color: "#4fc3f7"
-        border.width: 1
-        opacity: 0.9
-
-        Text {
-            id: phase_guide
-            anchors.centerIn: parent
-            text: bridge.phaseGuideLine
-            color: "#bfe3ff"
-            font.pixelSize: 13
-            font.bold: true
-            horizontalAlignment: Text.AlignHCenter
-        }
+    // Anchor a Loader per its panel layout ('bottom-left', ...).
+    function applyAnchor(loader, layout) {
+        loader.anchors.top = undefined;
+        loader.anchors.bottom = undefined;
+        loader.anchors.left = undefined;
+        loader.anchors.right = undefined;
+        loader.anchors.horizontalCenter = undefined;
+        // Default to bottom-left if the anchor is unknown.
+        var a = (layout && layout.anchor) ? layout.anchor : "bottom-left";
+        if (a.indexOf("top") === 0) loader.anchors.top = root.top;
+        else loader.anchors.bottom = root.bottom;
+        if (a.indexOf("left") >= 0) loader.anchors.left = root.left;
+        else if (a.indexOf("center") >= 0) loader.anchors.horizontalCenter = root.horizontalCenter;
+        else loader.anchors.right = root.right;
+        loader.anchors.margins = (layout && layout.marginPx !== undefined)
+                ? layout.marginPx : 12;
     }
 
-    // Boom angle + extension + leveling.
-    Rectangle {
-        width: 250
-        height: boom_lines.height + 10
-        radius: 5
-        color: "#000000"
-        opacity: 0.82
+    // Docking range rows: map the bridge rows through the config captions.
+    property var dockingRows: bridge.dockingRangeRows
 
-        Text {
-            id: boom_lines
-            anchors.centerIn: parent
-            text: bridge.boomAngleLine + "\n" + bridge.boomExtensionLine + "\n" + bridge.levelLine
-            color: "#cfe3f5"
-            font.pixelSize: 12
+    // -- Docking Ranges HUD (bottom-left by default) ----------------------
+    Loader {
+        id: docking_loader
+        active: bridge.operatorHudsVisible && bridge.hudLayout.docking.visible
+                && bridge.view !== "cutter"
+        sourceComponent: SensorHudPanel {
+            layout: bridge.hudLayout.docking
+            rows: root.dockingRows
+            subtitle: bridge.phaseGuideLine
         }
+        Component.onCompleted: root.applyAnchor(docking_loader, bridge.hudLayout.docking)
+        onActiveChanged: root.applyAnchor(docking_loader, bridge.hudLayout.docking)
     }
 
-    Rectangle {
-        width: 250
-        height: docking_rows.children.length * 20 + 48
-        radius: 5
-        color: "#000000"
-        opacity: 0.82
-        clip: true
-
-        Text {
-            anchors.top: parent.top
-            anchors.left: parent.left
-            anchors.margins: 6
-            text: "docking ranges"
-            color: "#9fb4c7"
-            font.pixelSize: 12
+    // -- Boom HUD (bottom-right by default; docking view only) ------------
+    Loader {
+        id: boom_loader
+        active: bridge.operatorHudsVisible && bridge.hudLayout.boom.visible
+                && bridge.view !== "cutter"
+        sourceComponent: SensorHudPanel {
+            layout: bridge.hudLayout.boom
+            rows: bridge.boomRows
         }
+        Component.onCompleted: root.applyAnchor(boom_loader, bridge.hudLayout.boom)
+        onActiveChanged: root.applyAnchor(boom_loader, bridge.hudLayout.boom)
+    }
 
-        Column {
-            id: docking_rows
-            anchors.top: parent.top
-            anchors.topMargin: 20
-            anchors.left: parent.left
-            anchors.margins: 4
-            spacing: 0
-
-            Repeater {
-                model: bridge.dockingRangeRows
-                delegate: Text {
-                    text: {
-                        var d = modelData.distance;
-                        var distance = (d === null || d === undefined || isNaN(d))
-                                 ? "INVALID" : d.toFixed(2) + " m";
-                        var mark = modelData.valid ? "●" : "○";
-                        return mark + " " + modelData.key + ": " + distance;
-                    }
-                    color: modelData.valid ? "#a8d08d" : "#e25c5c"
-                    font.pixelSize: 12
-                }
-            }
+    // -- Cutter Range HUD (cutter view only; key 1 toggles it) ------------
+    Loader {
+        id: cutter_loader
+        active: bridge.view === "cutter" && bridge.cutterHudVisible
+                && bridge.hudLayout.cutter_range.visible
+        sourceComponent: SensorHudPanel {
+            layout: bridge.hudLayout.cutter_range
+            rows: bridge.cutterRangeRow
         }
-
-        Text {
-            anchors.bottom: parent.bottom
-            anchors.left: parent.left
-            anchors.margins: 6
-            text: bridge.cutterRangeLine
-            color: "#cfe3f5"
-            font.pixelSize: 12
-        }
+        Component.onCompleted: root.applyAnchor(cutter_loader, bridge.hudLayout.cutter_range)
+        onActiveChanged: root.applyAnchor(cutter_loader, bridge.hudLayout.cutter_range)
     }
 }
