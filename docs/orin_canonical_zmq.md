@@ -104,11 +104,16 @@ The sensor HUD is split into two independently-toggled layers:
   | Panel | Default location | Contents |
   |---|---|---|
   | **Boom** | bottom-right | the seven PLC MQTT values: boom angle, boom length, slew angle, platform tilt X1/Y1, prime mover tilt X2/Y2 |
-  | **Docking Ranges** | bottom-left | the docking laser distances (45° left, center, 45° right) + phase guide |
+  | **Docking Ranges** | bottom-left | the docking ranges: laser distances (45° left, center, 45° right) and the left/right ultrasonic trunk-detection side ranges + phase guide |
   | **Cutter Range** | bottom-left | the cutter range reading |
+  | **Docking Safety** | bottom-center | the docking approach safety guidance: state banner, stop-bar, and speed/gap/TTC metrics (docking view only; see below) |
 
   On startup the docking camera is the default view and the Boom + Docking
-  Range panels are displayed.
+  Range panels are displayed. The three bottom panels (Docking Ranges
+  bottom-left, Docking Safety bottom-center, Boom bottom-right) are laid out
+  edge-to-edge so they never overlap; the Docking Safety panel occupies the gap
+  between its neighbours (capped at its configured width) and hides if the
+  screen is too narrow to show all three.
   - Pressing `1` switches to the cutter camera and shows **only** the Cutter
     Range HUD (Boom and Docking hide immediately). Pressing `1` again while on
     the cutter view hides/shows the Cutter Range HUD; the camera stays on
@@ -167,6 +172,73 @@ defaults and documents every accepted key:
 
 Unknown keys are ignored and any omitted key falls back to its default.
 
+#### Docking safety guidance (advisory, operator-facing)
+
+The **Docking Safety** panel (default bottom-center, docking view only) tells the
+operator, during the c-channel platform's final approach to the trunk, whether
+the closing speed is safe and at what speed to close. It reads the forward gap
+from the `center_line` record on `v1/range/docking` and derives the **platform
+closing speed** dashboard-side as the least-squares slope of the gap over ~1.5 s
+(`-d(gap)/dt`), EMA-smoothed. It is **advisory only**: the dashboard never
+commands motion.
+
+The panel shows a colour-coded **state banner** (`APPROACH OK` green /
+`SLOW …` orange / `STOP NOW` red / grey `NO RANGE DATA`), a **stop-bar** that
+compares the current gap (fill) with the required stopping distance
+`d_stop(v) = v·latency + v²/(2·a_max)` (white marker; the bar turns red once the
+marker meets the fill), and a **metrics row** (closing speed · gap · TTC · max
+safe speed). `NO DATA` is grey and distinct from a green `SAFE`; `danger` and
+`no_data` are adopted immediately while `safe`/`warn` transitions are debounced
+to prevent flicker.
+
+Two safety invariants hold regardless of tuning: the panel **never shows `SAFE`
+on absent, stale, or unfittable data** (a stalled range stream cannot invent a
+0 cm/s speed and clear a DANGER approach; while the gap is fresh but no closing
+speed can be fitted, a held WARN/DANGER is retained, and staleness falls through
+to `NO DATA`), and the banner text never contradicts its colour (a WARN banner
+always leads with `SLOW`). Thresholds are clamped on load, including the
+`danger` bands (pulled inside the corresponding `warn` bands) and a strictly
+positive `warn_margin`.
+
+The thresholds live in `harvester_dashboard/config/safety_guidance.json`, loaded
+with `--safety-config` (default: the shipped file; a missing/malformed file
+falls back to the built-in defaults, and out-of-range values are clamped):
+
+```bash
+PYTHONPATH=harvester_dashboard /usr/bin/python3 -m harvester_dashboard.main \
+  --pub tcp://127.0.0.1:5590 --status tcp://127.0.0.1:5600 \
+  --safety-config harvester_dashboard/config/safety_guidance.json
+```
+
+`a_max_m_s2` is the maximum safe platform deceleration and `latency_s` the
+operator reaction + actuation latency; `warn_margin` (0.7) fires WARN at 70% of
+the physical stop speed. Do not change `a_max_m_s2`/`latency_s` without operator
+sign-off.
+
+The guidance panel's **location, caption, size, fonts, opacity, stop-bar scale
+and per-row captions** are configured in the **same** `--hud-config` file as the
+other sensor HUDs, under the `dock_guidance` key:
+
+```jsonc
+{
+  "dock_guidance": {
+    "visible": true,
+    "anchor": "bottom-center",       // top|bottom + left|center|right
+    "caption": "DOCKING SAFETY",
+    "width": 620,
+    "height": 0,                     // 0 = auto-size to content
+    "value_font_px": 46,
+    "caption_font_px": 30,
+    "margin_px": 12,
+    "opacity": 0.85,
+    "stopbar_range_m": 1.5,          // stop-bar full scale (m)
+    "banner_font_px": 40,
+    "pulse_danger": true,
+    "rows": { "gap": "Gap", "max_speed": "Max Safe" }
+  }
+}
+```
+
 Notes on the `777`+`Enter` sequence:
 
 - Only the `7` key is buffered (it is ambiguous with the single-key `7` IMU
@@ -215,10 +287,12 @@ bind the canonical `5590` themselves.
   `WITH_RANGE_INGEST=1` to launch it. See
   `.kilo/plans/plc-docking-sequence-simulation.md`.
 - `mqtt_ingest` — **implemented**. Subscribes to a Mosquitto MQTT broker
-  (`mqtt://192.168.50.100:1883`, topic `harvester/sensors/v1`) that carries the
+  (`mqtt://192.168.50.40:1883`, topic `harvester/sensors/v1`) that carries the
   Node-RED PLC sensor stream and PUSHes canonical packets for `v1/boom/state`
   (boom angle/extension, platform/primemover tilt, slew angle) and
-  `v1/range/docking` (the laser docking distances). Launched by `run_all.sh`
+  `v1/range/docking` (the three laser docking distances plus the left/right
+  ultrasonic trunk-detection side ranges, mapped to `c_channel_left` /
+  `c_channel_right`). Launched by `run_all.sh`
   (configurable via `MQTT_HOST`/`MQTT_PORT`/`MQTT_TOPIC`).
 - `cutter_range_ingest` — **deferred** (`v1/range/cutter`).
 

@@ -137,9 +137,11 @@ class GuiSmokeTest(unittest.TestCase):
 
     def test_operator_hud_layout_and_rows(self):
         layout = self.bridge.hudLayout
-        self.assertEqual(set(layout), {'boom', 'docking', 'cutter_range'})
+        self.assertEqual(set(layout), {'boom', 'docking', 'cutter_range',
+                                       'dock_guidance'})
         self.assertEqual(layout['boom']['anchor'], 'bottom-right')
         self.assertEqual(layout['docking']['anchor'], 'bottom-left')
+        self.assertEqual(layout['dock_guidance']['anchor'], 'bottom-center')
         # Boom has the seven PLC MQTT sensor rows.
         keys = [row['key'] for row in self.bridge.boomRows]
         self.assertEqual(keys, [
@@ -269,6 +271,7 @@ class HudPanelGatingTest(unittest.TestCase):
             boom=HudPanelConfig(name='boom', visible=False, anchor='bottom-right'),
             docking=HudPanelConfig(name='docking', visible=True, anchor='bottom-left'),
             cutter_range=HudPanelConfig(name='cutter_range', visible=True),
+            dock_guidance=HudPanelConfig(name='dock_guidance', visible=True),
         )
         cls.bridge = DashboardBridge(
             DashboardConfig(status_endpoint='', annotation_endpoint=''),
@@ -298,17 +301,19 @@ class HudPanelGatingTest(unittest.TestCase):
         for _ in range(4):
             self.app.processEvents()
         active = [l.property('active') for l in self._loaders()]
-        # docking active, boom inactive, cutter inactive (docking view).
-        self.assertEqual(active, [True, False, False])
+        # docking active, boom inactive, cutter inactive (docking view),
+        # dock_guidance active (docking view + operator HUDs on).
+        self.assertEqual(active, [True, False, False, True])
 
     def test_docking_panel_hidden_on_cutter_view(self):
         # On the cutter view the docking panel hides so it cannot overlap
-        # the cutter-range panel (both default to bottom-left).
+        # the cutter-range panel (both default to bottom-left); the guidance
+        # panel is docking-view only too.
         self.bridge.set_view('cutter')
         for _ in range(4):
             self.app.processEvents()
         active = [l.property('active') for l in self._loaders()]
-        self.assertEqual(active, [False, False, True])
+        self.assertEqual(active, [False, False, True, False])
 
     def test_key2_toggle_drives_docking_loader(self):
         # Key 2 must actually drive the QML gating (docking loader active
@@ -344,6 +349,132 @@ class HudPanelGatingTest(unittest.TestCase):
         self.bridge._set_cutter_hud_visible(True)
         for _ in range(4):
             self.app.processEvents()
+
+
+@unittest.skipUnless(_GUI_IMPORTS_OK, 'PySide2 QtQuick not installed')
+class DockGuidanceGuiTest(unittest.TestCase):
+    """The docking safety-guidance HUD boots grey and renders in the layout."""
+
+    @classmethod
+    def setUpClass(cls):
+        from harvester_dashboard.bridge import DashboardBridge
+        from harvester_dashboard.image_provider import FrameImageProvider
+
+        cls.app = QGuiApplication.instance() or QGuiApplication(
+            ['harvester-dashboard-dock-guidance'])
+        cls.model = TelemetryModel()
+        cls.bridge = DashboardBridge(
+            DashboardConfig(status_endpoint='', annotation_endpoint=''),
+            cls.model, AnnotationState())
+        cls.view = QQuickView()
+        cls.view.engine().addImageProvider('frames', FrameImageProvider())
+        cls.view.rootContext().setContextProperty('bridge', cls.bridge)
+        qml_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'qml')
+        cls.view.setSource(QUrl.fromLocalFile(os.path.join(qml_dir, 'Dashboard.qml')))
+        cls.root = cls.view.rootObject()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.view.deleteLater()
+        cls.app.processEvents()
+        del cls.view
+
+    def _process(self):
+        for _ in range(4):
+            self.app.processEvents()
+
+    def test_guidance_boots_no_data_never_safe(self):
+        # Initial guidance must be NO_DATA (grey), never a reassuring green.
+        self.assertEqual(self.bridge.dockSafetyState, 'no_data')
+        self.assertIn('awaiting', self.bridge.dockGuidanceText)
+
+    def test_guidance_float_properties_are_nan_without_data(self):
+        import math
+        for value in (self.bridge.dockSpeedCmS,
+                      self.bridge.dockSpeedSmoothedCmS,
+                      self.bridge.dockCenterDistanceM,
+                      self.bridge.dockRecommendedSpeedCmS,
+                      self.bridge.dockMaxSpeedCmS,
+                      self.bridge.dockStopDistanceM,
+                      self.bridge.dockTtcS):
+            self.assertTrue(math.isnan(value), value)
+
+    def test_guidance_rows_present_and_shaped(self):
+        rows = self.bridge.dockSafetyRow
+        keys = [row['key'] for row in rows]
+        self.assertEqual(keys, ['state', 'speed', 'gap', 'ttc', 'max_speed'])
+        by_key = {r['key']: r for r in rows}
+        self.assertEqual(by_key['state']['value'], 'NO DATA')
+        self.assertFalse(by_key['state']['valid'])
+        for row in rows:
+            self.assertIn('label', row)
+            self.assertIn('value', row)
+
+    def test_guidance_panel_is_docking_view_only(self):
+        from PySide2.QtCore import QObject
+
+        def loaders():
+            return [c for c in self.root.findChildren(QObject)
+                    if c.metaObject().className() == 'QQuickLoader']
+
+        self.bridge.set_view('docking')
+        self._process()
+        # Loader order: docking, boom, cutter, dock_guidance.
+        self.assertTrue(loaders()[3].property('active'))
+        self.bridge.set_view('cutter')
+        self._process()
+        self.assertFalse(loaders()[3].property('active'))
+        self.bridge.set_view('docking')
+        self._process()
+        self.assertTrue(loaders()[3].property('active'))
+
+    def test_bottom_row_panels_do_not_overlap(self):
+        # The three bottom panels (docking ranges | dock guidance | boom) must
+        # sit edge-to-edge between the screen edges, never overlapping.
+        from PySide2.QtCore import QObject
+
+        def loaders():
+            return [c for c in self.root.findChildren(QObject)
+                    if c.metaObject().className() == 'QQuickLoader']
+
+        self.bridge.set_view('docking')
+        # The deployment monitor is 1920x1080; the panels only all fit at a
+        # width wide enough to leave a gap between the docking and boom panels.
+        self.root.setProperty('width', 1920)
+        self._process()
+        docking, boom, _cutter, guidance = loaders()
+        for loader in (docking, boom, guidance):
+            self.assertTrue(loader.property('active'))
+        self.assertTrue(guidance.property('visible'))
+        docking_right = docking.property('x') + docking.property('width')
+        guidance_left = guidance.property('x')
+        guidance_right = guidance.property('x') + guidance.property('width')
+        boom_left = boom.property('x')
+        self.assertLessEqual(docking_right, guidance_left,
+                             'docking ranges overlaps dock guidance')
+        self.assertLessEqual(guidance_right, boom_left,
+                             'dock guidance overlaps boom')
+        # Guidance sits between the two, not stacked on either edge.
+        self.assertGreater(guidance.property('width'), 0)
+        self.assertLess(guidance.property('x'), boom_left)
+
+    def test_bottom_row_hides_guidance_when_too_narrow(self):
+        # On a screen too narrow to fit all three, the guidance panel hides
+        # rather than overlapping its neighbours.
+        from PySide2.QtCore import QObject
+
+        def loaders():
+            return [c for c in self.root.findChildren(QObject)
+                    if c.metaObject().className() == 'QQuickLoader']
+
+        self.bridge.set_view('docking')
+        self.root.setProperty('width', 1024)
+        self._process()
+        _docking, _boom, _cutter, guidance = loaders()
+        self.assertFalse(guidance.property('visible'))
+        self.root.setProperty('width', 1920)
+        self._process()
 
 
 if __name__ == '__main__':

@@ -6,7 +6,7 @@ import tempfile
 import unittest
 
 from harvester_dashboard.hud_config import (
-    default_hud_layout, load_hud_config)
+    default_hud_config_path, default_hud_layout, load_hud_config)
 from harvester_dashboard.hud_config import HudLayoutConfig, HudPanelConfig
 
 
@@ -23,6 +23,7 @@ def _layout_with(boom_visible: bool, docking_visible: bool,
         boom=panel(base.boom, boom_visible),
         docking=panel(base.docking, docking_visible),
         cutter_range=panel(base.cutter_range, cutter_visible),
+        dock_guidance=panel(base.dock_guidance, base.dock_guidance.visible),
     )
 
 
@@ -36,6 +37,14 @@ class HudConfigDefaultsTest(unittest.TestCase):
         # Large enough to read from ~2 feet.
         self.assertGreaterEqual(layout.boom.value_font_px, 40)
         self.assertGreaterEqual(layout.docking.value_font_px, 40)
+
+    def test_none_path_resolves_shipped_config(self):
+        # With no --hud-config, the shipped file must be picked up so its
+        # panels (e.g. dock_guidance) reach a normal run_all.sh deploy.
+        path = default_hud_config_path()
+        self.assertTrue(path.exists(), path)
+        self.assertEqual(load_hud_config(None).dock_guidance.caption,
+                         load_hud_config(str(path)).dock_guidance.caption)
 
     def test_defaults_missing_file(self):
         layout = load_hud_config('/nonexistent/hud.json')
@@ -56,11 +65,33 @@ class HudConfigDefaultsTest(unittest.TestCase):
 
     def test_to_qml_shape(self):
         qml = default_hud_layout().to_qml()
-        self.assertEqual(set(qml), {'boom', 'docking', 'cutter_range'})
+        self.assertEqual(set(qml), {'boom', 'docking', 'cutter_range',
+                                    'dock_guidance'})
         self.assertEqual(qml['boom']['valueFontPx'],
                          default_hud_layout().boom.value_font_px)
         self.assertEqual(qml['docking']['anchor'], 'bottom-left')
         self.assertIn('rows', qml['docking'])
+
+    def test_dock_guidance_defaults(self):
+        layout = default_hud_layout()
+        panel = layout.dock_guidance
+        self.assertTrue(panel.visible)
+        self.assertEqual(panel.anchor, 'bottom-center')
+        self.assertEqual(panel.caption, 'DOCKING SAFETY')
+        self.assertGreaterEqual(panel.value_font_px, 40)
+        self.assertGreaterEqual(panel.banner_font_px, 30)
+        self.assertAlmostEqual(panel.stopbar_range_m, 1.5)
+        self.assertTrue(panel.pulse_danger)
+        # The metric row captions are named for the guidance columns.
+        self.assertEqual(panel.rows['gap'], 'Gap')
+        self.assertEqual(panel.rows['max_speed'], 'Max Safe')
+
+    def test_dock_guidance_to_qml_extras(self):
+        panel = default_hud_layout().to_qml()['dock_guidance']
+        self.assertIn('stopbarRangeM', panel)
+        self.assertIn('bannerFontPx', panel)
+        self.assertIn('pulseDanger', panel)
+        self.assertAlmostEqual(panel['stopbarRangeM'], 1.5)
 
 
 class HudConfigOverrideTest(unittest.TestCase):
@@ -101,6 +132,32 @@ class HudConfigOverrideTest(unittest.TestCase):
         self.assertEqual(layout.boom.rows['boom_angle_deg'], 'Angle')
         # Unmentioned default rows survive the merge.
         self.assertIn('boom_extension_m', layout.boom.rows)
+
+    def test_dock_guidance_override(self):
+        path = self._write({
+            'dock_guidance': {
+                'anchor': 'bottom-right',
+                'caption': 'DOCK SAFETY',
+                'width': 800,
+                'visible': False,
+                'banner_font_px': 52,
+                'stopbar_range_m': 2.0,
+                'pulse_danger': False,
+                'rows': {'gap': 'Distance'},
+            },
+        })
+        layout = load_hud_config(path)
+        panel = layout.dock_guidance
+        self.assertEqual(panel.anchor, 'bottom-right')
+        self.assertEqual(panel.caption, 'DOCK SAFETY')
+        self.assertEqual(panel.width, 800)
+        self.assertFalse(panel.visible)
+        self.assertEqual(panel.banner_font_px, 52)
+        self.assertAlmostEqual(panel.stopbar_range_m, 2.0)
+        self.assertFalse(panel.pulse_danger)
+        self.assertEqual(panel.rows['gap'], 'Distance')
+        # Unmentioned default rows survive the merge.
+        self.assertIn('max_speed', panel.rows)
 
     def test_unknown_keys_ignored(self):
         path = self._write({'docking': {'anchor': 'bottom-left', 'bogus': 1},

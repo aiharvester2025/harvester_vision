@@ -28,6 +28,10 @@ class DashboardConfig:
     # None falls back to the built-in defaults (or the shipped hud_config.json
     # when the launcher passes it explicitly).
     hud_config_path: Optional[str] = None
+    # Optional path to the docking safety-guidance tuning file.  None (the
+    # default) falls back to the module's best-effort path, then to the built-in
+    # thresholds; a missing/malformed file never raises.
+    safety_config_path: Optional[str] = None
 
     @property
     def status_enabled(self) -> bool:
@@ -62,6 +66,8 @@ class DashboardConfig:
                             help='maximum depth-unprojected points kept for the camera point-cloud panel')
         parser.add_argument('--hud-config', default=None,
                             help='path to a JSON file overriding HUD panel layout/captions/sizes')
+        parser.add_argument('--safety-config', default=None,
+                            help='path to the docking safety-guidance tuning JSON file')
         known, _unknown = parser.parse_known_args(args)
         return cls(
             pub_endpoint=known.pub,
@@ -75,4 +81,5 @@ class DashboardConfig:
             qml_directory=known.qml_directory if hasattr(known, 'qml_directory') else None,
             pointcloud_max_points=max(1, known.pointcloud_max_points),
             hud_config_path=(known.hud_config or None),
+            safety_config_path=(known.safety_config or None),
         )

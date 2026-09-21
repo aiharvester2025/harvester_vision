@@ -1,0 +1,29 @@
+{
+  "schema_version": 2,
+  "description": "Docking approach safety-guidance thresholds for the operator HUD.",
+  "units": {
+    "a_max": "m/s^2 (max safe platform deceleration)",
+    "latency": "seconds (operator reaction + actuation latency)",
+    "ttc": "seconds (time-to-collision = distance / closing speed)",
+    "distance": "meters (center laser range to trunk)",
+    "speed": "cm/s (positive = closing on trunk)",
+    "epsilon": "cm/s (below this the platform is considered stationary)",
+    "stale": "seconds (range age beyond which the HUD shows NO DATA)"
+  },
+
+  "a_max_m_s2": 0.10,
+  "latency_s": 0.30,
+  "warn_margin": 0.7,
+
+  "warn_ttc_s": 4.0,
+  "danger_ttc_s": 1.5,
+
+  "warn_distance_m": 1.0,
+  "danger_distance_m": 0.3,
+
+  "stationary_epsilon_cm_s": 0.5,
+  "stale_s": 2.0,
+  "debounce_s": 0.4,
+
+  "speed_ema_alpha": 0.35
+}

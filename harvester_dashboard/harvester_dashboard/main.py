@@ -51,15 +51,20 @@ def main(argv=None) -> int:
     from .bridge import DashboardBridge
     from .image_provider import FrameImageProvider
     from .hud_config import load_hud_config
+    from .safety_guidance import SafetyConfig, default_config_path
     from .zmq_source import TelemetrySource
 
     model = TelemetryModel()
     annotation = AnnotationState()
     from .annotation_publisher import AnnotationPublisher
     annotation_publisher = AnnotationPublisher(config.annotation_endpoint)
+    # Safety tuning: an explicit --safety-config path, else the shipped file,
+    # else the built-in defaults (the loader never raises).
+    safety_path = config.safety_config_path or default_config_path()
     bridge = DashboardBridge(config, model, annotation,
                              annotation_publisher=annotation_publisher,
-                             hud_config=load_hud_config(config.hud_config_path))
+                             hud_config=load_hud_config(config.hud_config_path),
+                             safety_config=SafetyConfig.load(safety_path))
     provider = FrameImageProvider()
     source = TelemetrySource(config, model)
     source.on_frame = _make_frame_sink(bridge, provider)

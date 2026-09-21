@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 
@@ -17,6 +18,7 @@ from typing import Any, Dict, Optional
 BOOM = 'boom'
 DOCKING = 'docking'
 CUTTER_RANGE = 'cutter_range'
+DOCK_GUIDANCE = 'dock_guidance'
 
 # Anchors accepted for a panel.  ``value`` is the position name used in JSON
 # (``<vertical>-<horizontal>``); ``horizontal``/``vertical`` below drive QML.
@@ -33,8 +35,8 @@ _DEFAULT_DOCKING_ROWS = {
     'center_line': 'Center',
     'diagonal_left_45deg': '45\u00b0 Left',
     'diagonal_right_45deg': '45\u00b0 Right',
-    'c_channel_left': 'Side Left',
-    'c_channel_right': 'Side Right',
+    'c_channel_left': 'Left',
+    'c_channel_right': 'Right',
 }
 
 # Default display names for the boom fields (PLC MQTT subscriber values on
@@ -53,6 +55,17 @@ _DEFAULT_CUTTER_ROWS = {
     'cutter_range': 'Cutter',
 }
 
+# Default display names for the docking safety-guidance metrics rows (see
+# safety_guidance.py / the DockGuidanceHud panel).  Only the rows the dedicated
+# panel renders are named here.
+_DEFAULT_DOCK_GUIDANCE_ROWS = {
+    'state': 'State',
+    'speed': 'Closing Speed',
+    'gap': 'Gap',
+    'ttc': 'TTC',
+    'max_speed': 'Max Safe',
+}
+
 
 @dataclass
 class HudPanelConfig:
@@ -69,6 +82,12 @@ class HudPanelConfig:
     margin_px: int = 12
     opacity: float = 0.85
     rows: Dict[str, str] = field(default_factory=dict)
+    # Dock-guidance-only extras (ignored by the generic SensorHudPanel, used by
+    # DockGuidanceHud.qml).  Kept on the shared dataclass so the guidance panel
+    # is configured in the same file/loader as every other sensor HUD.
+    stopbar_range_m: float = 1.5      # full-scale gap of the stop-bar (m)
+    banner_font_px: int = 40          # state-banner text size
+    pulse_danger: bool = True         # pulse the banner while DANGER
 
     def to_qml(self) -> Dict[str, Any]:
         """Return a plain dict suitable for a QVariantMap bridge property."""
@@ -84,6 +103,9 @@ class HudPanelConfig:
             'marginPx': int(self.margin_px),
             'opacity': float(self.opacity),
             'rows': dict(self.rows),
+            'stopbarRangeM': float(self.stopbar_range_m),
+            'bannerFontPx': int(self.banner_font_px),
+            'pulseDanger': bool(self.pulse_danger),
         }
 
 
@@ -94,12 +116,14 @@ class HudLayoutConfig:
     boom: HudPanelConfig
     docking: HudPanelConfig
     cutter_range: HudPanelConfig
+    dock_guidance: HudPanelConfig
 
     def to_qml(self) -> Dict[str, Any]:
         return {
             BOOM: self.boom.to_qml(),
             DOCKING: self.docking.to_qml(),
             CUTTER_RANGE: self.cutter_range.to_qml(),
+            DOCK_GUIDANCE: self.dock_guidance.to_qml(),
         }
 
 
@@ -144,6 +168,24 @@ def default_hud_layout() -> HudLayoutConfig:
             margin_px=12,
             opacity=0.85,
             rows=dict(_DEFAULT_CUTTER_ROWS),
+        ),
+        dock_guidance=HudPanelConfig(
+            name=DOCK_GUIDANCE,
+            visible=True,
+            # Bottom-center, between the docking-ranges (bottom-left) and boom
+            # (bottom-right) panels.
+            anchor='bottom-center',
+            caption='DOCKING SAFETY',
+            width=620,
+            height=0,
+            value_font_px=46,
+            caption_font_px=30,
+            margin_px=12,
+            opacity=0.85,
+            rows=dict(_DEFAULT_DOCK_GUIDANCE_ROWS),
+            stopbar_range_m=1.5,
+            banner_font_px=40,
+            pulse_danger=True,
         ),
     )
 
@@ -211,6 +253,11 @@ def _merge_panel(base: HudPanelConfig, raw: Any, name: str) -> HudPanelConfig:
         margin_px=max(0, _as_int(raw.get('margin_px'), base.margin_px)),
         opacity=min(1.0, max(0.0, _as_float(raw.get('opacity'), base.opacity))),
         rows=rows,
+        stopbar_range_m=max(1e-3, _as_float(
+            raw.get('stopbar_range_m'), base.stopbar_range_m)),
+        banner_font_px=max(1, _as_int(
+            raw.get('banner_font_px'), base.banner_font_px)),
+        pulse_danger=_as_bool(raw.get('pulse_danger'), base.pulse_danger),
     )
 
 
@@ -219,15 +266,29 @@ def _reject_non_finite(literal: str) -> float:
     raise ValueError('{} is not a valid number in a hud config'.format(literal))
 
 
+def default_hud_config_path() -> Path:
+    """Best-effort path to the shipped HUD layout overriding the defaults.
+
+    Resolved as ``harvester_dashboard/hud_config.json`` relative to the
+    repository root (one level above the package), matching the launch layout.
+    A missing file is not an error: ``load_hud_config`` falls back to the
+    built-in defaults.
+    """
+    return Path(__file__).resolve().parent.parent / 'hud_config.json'
+
+
 def load_hud_config(path: Optional[str]) -> HudLayoutConfig:
     """Load the admin HUD layout, falling back to built-in defaults.
 
-    ``None``/empty path or a missing file yields the defaults.  An explicitly
-    supplied path that exists but is unreadable or malformed is fatal so an
-    operator display never silently boots with a half-applied configuration.
+    ``None``/empty path uses the shipped ``hud_config.json`` when present, else
+    the built-in defaults; an explicitly supplied path that exists but is
+    unreadable or malformed is fatal so an operator display never silently
+    boots with a half-applied configuration.
     """
     layout = default_hud_layout()
     if not path:
+        path = str(default_hud_config_path())
+    if not Path(path).exists():
         return layout
 
     try:
@@ -251,11 +312,13 @@ def load_hud_config(path: Optional[str]) -> HudLayoutConfig:
         docking=_merge_panel(layout.docking, data.get(DOCKING), DOCKING),
         cutter_range=_merge_panel(
             layout.cutter_range, data.get(CUTTER_RANGE), CUTTER_RANGE),
+        dock_guidance=_merge_panel(
+            layout.dock_guidance, data.get(DOCK_GUIDANCE), DOCK_GUIDANCE),
     )
 
 
 __all__ = [
-    'BOOM', 'DOCKING', 'CUTTER_RANGE',
+    'BOOM', 'DOCKING', 'CUTTER_RANGE', 'DOCK_GUIDANCE',
     'HudPanelConfig', 'HudLayoutConfig',
-    'default_hud_layout', 'load_hud_config',
+    'default_hud_layout', 'load_hud_config', 'default_hud_config_path',
 ]

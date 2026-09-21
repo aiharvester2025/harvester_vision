@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """MQTT ingest adapter for the canonical telemetry bus.
 
-Subscribes to a Mosquitto MQTT broker (``mqtt://192.168.50.100:1883``, topic
+Subscribes to a Mosquitto MQTT broker (``mqtt://192.168.50.40:1883``, topic
 ``harvester/sensors/v1``) that carries the harvester PLC sensor stream published
 by Node-RED, and republishes it as canonical three-frame packets into the Orin
 aggregator's PULL socket (``tcp://127.0.0.1:5570``).  It never binds the
@@ -16,7 +16,13 @@ Node-RED ``mqtt out`` node on ``harvester/sensors/v1``):
 
   ``RUN``, ``Platform Tilt X1``, ``Platform Tilt Y1``, ``PrimeMover Tilt X2``,
   ``PrimeMover Tilt Y2``, ``Boom_Length``, ``Boom_Angle``, ``Slew Angle``,
-  ``Ultrasonic Left``.
+  ``Laser Distance Left``, ``Laser Distance Center``, ``Laser Distance Right``,
+  ``Ultrasonic Distance Left``, ``Ultrasonic DIstance Right`` (note the PLC's
+  misspelling of the right ultrasonic key; both spellings are accepted).
+
+The two ultrasonic readings are the left/right trunk-detection side sensors and
+are published as the canonical ``c_channel_left`` / ``c_channel_right`` side
+docking ranges.
 
 Safety boundary: observation-only.  This adapter only forwards measurements; it
 never emits an actuation or motion command.
@@ -24,7 +30,7 @@ never emits an actuation or motion command.
 Run under the depthai-env python::
 
     PYTHONPATH=canonical_zmq python3 -m canonical_zmq_publisher.mqtt_ingest \
-        --mqtt-host 192.168.50.100 --mqtt-port 1883 \
+        --mqtt-host 192.168.50.40 --mqtt-port 1883 \
         --topic harvester/sensors/v1 \
         --ingest-endpoint tcp://127.0.0.1:5570
 """
@@ -42,15 +48,28 @@ from harvester_telemetry_contract import pack_message
 
 
 # The docking/range sensors this adapter emits.  The payload carries the three
-# laser distance readings (left/center/right); the canonical
-# ``v1/range/docking`` channel expects a list of telemetry-keyed records, so we
-# emit one record per laser with a stable frame_id.  Additional sensors can be
-# appended here as the Node-RED stream grows without changing the contract.
+# laser distance readings (left/center/right) plus two ultrasonic side-distance
+# readings (left/right trunk detection); the canonical ``v1/range/docking``
+# channel expects a list of telemetry-keyed records, so we emit one record per
+# sensor with a stable frame_id.  Additional sensors can be appended here as the
+# Node-RED stream grows without changing the contract.
 SENSOR_BINDINGS = [
     ("diagonal_left_45deg", "sensor_diagonal_left_frame", "Laser Distance Left"),
     ("center_line", "sensor_center_line_frame", "Laser Distance Center"),
     ("diagonal_right_45deg", "sensor_diagonal_right_frame", "Laser Distance Right"),
+    # Ultrasonic left/right trunk-detection sensors feed the canonical
+    # c-channel side docking ranges (S_L2 / S_R2).
+    ("c_channel_left", "sensor_c_channel_left_frame", "Ultrasonic Distance Left"),
+    ("c_channel_right", "sensor_c_channel_right_frame", "Ultrasonic DIstance Right"),
 ]
+
+# Wire keys whose spelling varies on the PLC stream: the adapter tries each
+# alternate when the primary key is absent or non-numeric.  The right-hand
+# sensors are the known offenders (the PLC occasionally misspells them).
+_WIRE_KEY_ALIASES = {
+    'diagonal_right_45deg': ('Laser Distance Right', 'Laser Distanec Right'),
+    'c_channel_right': ('Ultrasonic DIstance Right', 'Ultrasonic Distance Right'),
+}
 
 CALIBRATION_ID = "mqtt_plc_provisional_v0"
 SOURCE_ID = "mqtt_plc"
@@ -117,10 +136,14 @@ def map_docking_records(payload):
         payload = {}
     records = []
     for telemetry_key, frame_id, wire_key in SENSOR_BINDINGS:
-        distance = _as_float(payload.get(wire_key))
-        if distance is None and wire_key == 'Laser Distance Right':
-            # The PLC stream occasionally misspells the right sensor key.
-            distance = _as_float(payload.get('Laser Distanec Right'))
+        # Try the primary wire key, then any known spelling variants (the PLC
+        # stream occasionally misspells the right-hand sensor keys).
+        candidates = _WIRE_KEY_ALIASES.get(telemetry_key, (wire_key,))
+        distance = None
+        for candidate in candidates:
+            distance = _as_float(payload.get(candidate))
+            if distance is not None:
+                break
         valid = distance is not None
         records.append({
             'telemetry_key': telemetry_key,
@@ -138,7 +161,7 @@ def map_docking_records(payload):
 class MqttIngest:
     """MQTT subscriber that PUSHes canonical packets to the aggregator."""
 
-    def __init__(self, mqtt_host='192.168.50.100', mqtt_port=1883,
+    def __init__(self, mqtt_host='192.168.50.40', mqtt_port=1883,
                  topic='harvester/sensors/v1',
                  ingest_endpoint='tcp://127.0.0.1:5570',
                  username=None, password=None):
@@ -224,7 +247,7 @@ class MqttIngest:
 
 def _arguments(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--mqtt-host', default='192.168.50.100',
+    parser.add_argument('--mqtt-host', default='192.168.50.40',
                         help='Mosquitto broker host')
     parser.add_argument('--mqtt-port', type=int, default=1883,
                         help='Mosquitto broker port')

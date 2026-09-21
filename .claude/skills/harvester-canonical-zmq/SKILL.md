@@ -22,7 +22,7 @@ gateway.
 ## System architecture (memorize this)
 
 ```
-Mosquitto MQTT (192.168.50.100:1883, topic harvester/sensors/v1)  [default PLC source]
+Mosquitto MQTT (192.168.50.40:1883, topic harvester/sensors/v1)  [default PLC source]
         ──SUB──►  mqtt_ingest.py  ──PUSH──►
 Pi PLC (192.168.50.40, tcp://*:5555, topic harvester.sensors.v1)  [legacy, opt-in]
         ──SUB──►  range_ingest.py ──PUSH──►   (WITH_RANGE_INGEST=1)
@@ -118,6 +118,13 @@ The required header fields (`_GLOBAL_FIELDS`): `schema_version`, `source_mode`, 
 pairs: `center_line`→`sensor_center_line_frame`, `diagonal_left_45deg`→`sensor_diagonal_left_frame`,
 `diagonal_right_45deg`→`sensor_diagonal_right_frame`, `c_channel_left`→`sensor_c_channel_left_frame`,
 `c_channel_right`→`sensor_c_channel_right_frame`).
+
+The MQTT adapter (`mqtt_ingest.py`) uses the same `c_channel_left`/`c_channel_right` keys for the
+two **ultrasonic side trunk-detection sensors** on the PLC MQTT stream: wire keys
+`Ultrasonic Distance Left` and `Ultrasonic DIstance Right` (the PLC misspells the right key — both
+spellings are accepted via its `_WIRE_KEY_ALIASES` table), alongside the three laser distances
+(`Laser Distance Left/Center/Right`, the right one also tolerated misspelled as `Laser Distanec
+Right`). Its `SENSOR_BINDINGS` entries are 3-tuples `(telemetry_key, frame_id, wire_key)`.
 
 ## Aggregator behavior (read before touching it)
 

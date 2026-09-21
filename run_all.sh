@@ -96,7 +96,7 @@ WITH_RANGE_INGEST="${WITH_RANGE_INGEST:-0}"
 RANGE_CMD=(env "PYTHONPATH=canonical_zmq:." "${DAI_PY}" -m canonical_zmq_publisher.range_ingest --sensor-sub "${SENSOR_SUB:-tcp://192.168.50.40:5555}" --topic "${SENSOR_TOPIC:-harvester.sensors.v1}" --ingest-endpoint tcp://127.0.0.1:5570)
 # MQTT ingest: SUB to the Mosquitto broker (Node-RED PLC stream on
 # harvester/sensors/v1) and PUSH canonical packets into the aggregator.
-MQTT_CMD=(env "PYTHONPATH=canonical_zmq:." "${DAI_PY}" -m canonical_zmq_publisher.mqtt_ingest --mqtt-host "${MQTT_HOST:-192.168.50.100}" --mqtt-port "${MQTT_PORT:-1883}" --topic "${MQTT_TOPIC:-harvester/sensors/v1}" --ingest-endpoint tcp://127.0.0.1:5570)
+MQTT_CMD=(env "PYTHONPATH=canonical_zmq:." "${DAI_PY}" -m canonical_zmq_publisher.mqtt_ingest --mqtt-host "${MQTT_HOST:-192.168.50.40}" --mqtt-port "${MQTT_PORT:-1883}" --topic "${MQTT_TOPIC:-harvester/sensors/v1}" --ingest-endpoint tcp://127.0.0.1:5570)
 # MALLOC_ARENA_MAX=2 caps glibc at two malloc arenas (default is cores*8=32 on
 # aarch64), which keeps the per-frame 6 MB numpy buffers from fragmenting the
 # process address space into hundreds of mmap'd arenas.  This is the dominant

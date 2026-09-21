@@ -31,13 +31,16 @@ QML**, and it is strictly **render-only** (no socket writes from view/toggle con
   - `HudOverlay.qml` — MIXED-SOURCES warning, the operator sensor panels host
     (`SensorPanel`), right trunk/calibration, bottom stream-errors panel
     (diagnostic-gated).
-  - `SensorPanel.qml` — hosts the three config-driven operator panels in Loaders,
+  - `SensorPanel.qml` — hosts the four config-driven operator panels in Loaders,
     anchored from `bridge.hudLayout`: **Boom** (bottom-right; PLC MQTT values:
     boom angle, boom length, slew angle, platform tilt X1/Y1, prime mover tilt
     X2/Y2), **Docking Ranges** (bottom-left, + phase guide), **Cutter Range**
-    (cutter view only).
+    (cutter view only), and **Docking Safety** (bottom-center, docking view only).
   - `SensorHudPanel.qml` — generic panel (caption + caption/value rows) driven by
     a `bridge.hudLayout.<name>` config object and a rows model.
+  - `DockGuidanceHud.qml` — docking safety-guidance panel (state banner,
+    stop-bar, metrics), driven by `bridge.hudLayout.dock_guidance` and the
+    `bridge.dock*` properties (see `safety_guidance.py`).
   - `CameraView.qml` — camera image (image://frames), stale ring + timestamp line
     (diagnostic-gated), click annotation, crosshair.
   - `LidarInset.qml`, `PointCloudInset.qml`, `Annotation.qml` — inset overlays.
@@ -56,6 +59,28 @@ The HUD is split into two independently-toggled layers:
   camera, and on the cutter camera it returns to docking, hides the Cutter HUD,
   and shows Boom+Docking. Layout/captions/sizes are admin-set via `--hud-config`
   (see `harvester_dashboard/hud_config.py`).
+- **Docking safety guidance** (`bridge.dock*`, docking view only): an advisory
+  speed/gap envelope over the `center_line` range record. `safety_guidance.py`
+  (pure Python) maps (closing speed, gap) onto `safe`/`warn`/`danger`/`no_data`
+  using the stopping-distance + TTC model. `bridge.py` derives the closing speed
+  (`-d(gap)/dt` least-squares slope over a 1.5 s window, EMA-smoothed), applies
+  the staleness TTL and hysteresis debounce, and exposes `dockSafetyState/
+  dockGuidanceText/dockSafetyRow/dockSpeedCmS/dockSpeedSmoothedCmS/
+  dockCenterDistanceM/dockStopDistanceM/dockMaxSpeedCmS/
+  dockRecommendedSpeedCmS/dockTtcS`. Thresholds come from `--safety-config`
+  (`config/safety_guidance.json`). `DockGuidanceHud.qml` renders it; its layout
+  is the `dock_guidance` panel in the same `--hud-config` file. It is advisory
+  only and render-only.
+
+  Two invariants worth protecting: (1) the HUD must **never** show `safe` when
+  the range is absent, stale, or has no fittable closing speed — a stalled
+  stream must not invent a 0 cm/s speed and flip DANGER to a reassuring green
+  (`evaluate` takes `speed_cm_s=None` → `no_data`, and the bridge holds a
+  WARN/DANGER while the gap is fresh but unfittable); (2) the displayed message
+  must never contradict the shown state (a WARN banner always leads with
+  `SLOW`). The `Docking Ranges` panel rows for the two ultrasonic side sensors
+  are labelled `Left`/`Right` (`c_channel_left`/`c_channel_right`).
+
 - **Developer-diagnostic HUD** (`7` `7` `7` + `Enter` → `bridge.diagnosticVisible`): bottom
   stream table, toolbar status line, active-camera timestamp line, stale-camera ring.
 

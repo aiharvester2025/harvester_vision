@@ -33,8 +33,8 @@
       "center_line": "Center",
       "diagonal_left_45deg": "45\u00b0 Left",
       "diagonal_right_45deg": "45\u00b0 Right",
-      "c_channel_left": "Side Left",
-      "c_channel_right": "Side Right"
+      "c_channel_left": "Left",
+      "c_channel_right": "Right"
     }
   },
   "cutter_range": {
@@ -49,6 +49,27 @@
     "opacity": 0.85,
     "rows": {
       "cutter_range": "Cutter"
+    }
+  },
+  "dock_guidance": {
+    "visible": true,
+    "anchor": "bottom-center",
+    "caption": "DOCKING SAFETY",
+    "width": 620,
+    "height": 0,
+    "value_font_px": 46,
+    "caption_font_px": 30,
+    "margin_px": 12,
+    "opacity": 0.85,
+    "stopbar_range_m": 1.5,
+    "banner_font_px": 40,
+    "pulse_danger": true,
+    "rows": {
+      "state": "State",
+      "speed": "Closing Speed",
+      "gap": "Gap",
+      "ttc": "TTC",
+      "max_speed": "Max Safe"
     }
   }
 }

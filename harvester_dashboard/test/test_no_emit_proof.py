@@ -66,8 +66,18 @@ class NoEmitProofTest(unittest.TestCase):
         bridge = DashboardBridge(config, model, annotation)
         self._send_something()
 
-        # Drive every view control many times while spinning the loop.
+        # Feed a shrinking center-range series so the safety-guidance path
+        # (speed derivation + evaluation + HUD properties) actually runs, then
+        # drive every view control many times while spinning the loop.
+        import time as _time
+        distance = 3.0
         for _ in range(20):
+            distance = max(0.2, distance - 0.05)
+            from helpers import json_packet
+            model.ingest_frames(json_packet('v1/range/docking', [
+                {'telemetry_key': 'center_line', 'distance_m': distance,
+                 'valid': True}], sequence=int(_time.time() * 10) % 1000 + 1))
+            bridge.refresh()
             bridge.set_view('docking')
             bridge.set_view('cutter')
             bridge.select_cutter_view()
@@ -77,8 +87,8 @@ class NoEmitProofTest(unittest.TestCase):
             bridge.toggle_diagnostic()
             for _ in range(5):
                 app.processEvents()
-            # The annotation spy channel must stay silent: view switching
-            # never emits traffic on any socket.
+            # The annotation spy channel must stay silent: view switching and
+            # the guidance path never emit traffic on any socket.
             try:
                 self.annotation_spy.recv_multipart(zmq.NOBLOCK)
                 self.fail('annotation socket received traffic during view switch')

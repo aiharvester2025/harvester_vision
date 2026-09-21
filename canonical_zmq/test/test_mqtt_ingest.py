@@ -58,11 +58,41 @@ class DockingRecordMappingTest(unittest.TestCase):
         records = map_docking_records(payload)
         by_key = {r['telemetry_key']: r for r in records}
         self.assertEqual(set(by_key), {
-            'diagonal_left_45deg', 'center_line', 'diagonal_right_45deg'})
+            'diagonal_left_45deg', 'center_line', 'diagonal_right_45deg',
+            'c_channel_left', 'c_channel_right'})
         self.assertAlmostEqual(by_key['diagonal_left_45deg']['distance_m'], 4.897)
         self.assertAlmostEqual(by_key['center_line']['distance_m'], 5.152)
         self.assertAlmostEqual(by_key['diagonal_right_45deg']['distance_m'], 5.104)
-        self.assertTrue(all(r['valid'] for r in records))
+        self.assertTrue(by_key['diagonal_left_45deg']['valid'])
+        self.assertTrue(by_key['center_line']['valid'])
+        self.assertTrue(by_key['diagonal_right_45deg']['valid'])
+        # The ultrasonic side sensors are absent here, so they are invalid.
+        self.assertFalse(by_key['c_channel_left']['valid'])
+        self.assertFalse(by_key['c_channel_right']['valid'])
+
+    def test_maps_ultrasonic_side_distances(self):
+        # Live keys from the PLC MQTT stream: the right ultrasonic key is
+        # misspelled ("DIstance") and must still be picked up.
+        payload = {
+            'Ultrasonic Distance Left': 1.541,
+            'Ultrasonic DIstance Right': 1.542,
+        }
+        by_key = {r['telemetry_key']: r for r in map_docking_records(payload)}
+        self.assertAlmostEqual(by_key['c_channel_left']['distance_m'], 1.541)
+        self.assertAlmostEqual(by_key['c_channel_right']['distance_m'], 1.542)
+        self.assertTrue(by_key['c_channel_left']['valid'])
+        self.assertTrue(by_key['c_channel_right']['valid'])
+        self.assertEqual(by_key['c_channel_left']['frame_id'],
+                         'sensor_c_channel_left_frame')
+        self.assertEqual(by_key['c_channel_right']['frame_id'],
+                         'sensor_c_channel_right_frame')
+
+    def test_ultrasonic_right_correct_spelling_also_accepted(self):
+        by_key = {r['telemetry_key']: r
+                  for r in map_docking_records(
+                      {'Ultrasonic Distance Right': 1.5})}
+        self.assertAlmostEqual(by_key['c_channel_right']['distance_m'], 1.5)
+        self.assertTrue(by_key['c_channel_right']['valid'])
 
     def test_right_key_typo_is_tolerated(self):
         # The PLC stream sometimes misspells the right sensor key.
@@ -74,7 +104,7 @@ class DockingRecordMappingTest(unittest.TestCase):
 
     def test_missing_distances_are_invalid(self):
         records = map_docking_records({})
-        self.assertEqual(len(records), 3)
+        self.assertEqual(len(records), 5)
         self.assertTrue(all(not r['valid'] for r in records))
         self.assertTrue(all(r['distance_m'] is None for r in records))
 

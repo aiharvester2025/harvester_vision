@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import math
 import time
+from collections import deque
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -28,6 +29,9 @@ from .hud_config import HudLayoutConfig, default_hud_layout
 from .model.telemetry_model import TelemetryModel
 from .model.target_model import AnnotationState
 from .status_client import StatusClient
+
+from . import safety_guidance
+from .safety_guidance import DANGER, NO_DATA, SAFE, WARN, SafetyConfig
 
 
 if _QT_AVAILABLE:
@@ -46,6 +50,7 @@ if _QT_AVAILABLE:
         ranges_changed = Signal()
         trunk_changed = Signal()
         boom_changed = Signal()
+        dock_safety_changed = Signal()
         mqtt_sensors_changed = Signal()
         calibration_changed = Signal()
         stream_rows_changed = Signal()
@@ -66,6 +71,7 @@ if _QT_AVAILABLE:
         def __init__(self, config: DashboardConfig, model: TelemetryModel,
                      annotation: AnnotationState, annotation_publisher=None,
                      hud_config: Optional[HudLayoutConfig] = None,
+                     safety_config: Optional[SafetyConfig] = None,
                      parent=None):
             super().__init__(parent)
             self.config = config
@@ -73,6 +79,13 @@ if _QT_AVAILABLE:
             self.annotation = annotation
             self.annotation_publisher = annotation_publisher
             self.hud_config = hud_config or default_hud_layout()
+            # Docking safety-guidance thresholds.  None falls back to the
+            # shipped tuning file, then to the built-in defaults (the loader
+            # never raises), so a direct construction without a config still
+            # works.
+            self.safety_config = (safety_config if safety_config is not None
+                                  else SafetyConfig.load(
+                                      safety_guidance.default_config_path()))
             self.status_client = (
                 StatusClient(config.status_endpoint,
                              timeout_ms=self.STATUS_TIMEOUT_MS)
@@ -94,7 +107,8 @@ if _QT_AVAILABLE:
             # key 1 toggles it when already on the cutter view.
             self._cutter_hud_visible = self.hud_config.cutter_range.visible
             self._diagnostic_visible = False
-            self._lidar_visible = True
+            # The LiDAR inset is hidden at startup (key 4 toggles it).
+            self._lidar_visible = False
             self._lidar_view_index = 0
             self._pointcloud_visible = False
             self._imu_enabled = True
@@ -113,6 +127,23 @@ if _QT_AVAILABLE:
             self._last_status_response: Optional[Dict[str, Any]] = None
             self._maintenance_mode = 'unknown'
             self._lidar_points: List[List[float]] = []
+            # Docking safety-guidance state.
+            # (receipt_monotonic_s, distance_m) samples for the least-squares
+            # closing-speed slope; pruned to _SPEED_MAX_SAMPLE_AGE_S.
+            self._center_samples: deque = deque()
+            self._last_center_sample: Optional[tuple] = None
+            # Identity of the sample window the cached speed was fitted from,
+            # so the 200 ms refresh does not re-fit an unchanged window.
+            self._dock_speed_fit_key: Optional[tuple] = None
+            self._dock_speed_raw: Optional[float] = None      # cm/s
+            self._dock_speed_smoothed: Optional[float] = None  # cm/s
+            self._dock_center_distance: Optional[float] = None  # m
+            # Initial guidance is NO_DATA (never SAFE) so the HUD never shows a
+            # reassuring green before any range has arrived.
+            self._guidance = safety_guidance.evaluate(
+                None, None, self.safety_config)
+            self._guidance_state = NO_DATA
+            self._guidance_state_since = time.monotonic()
             self._refresh = QTimer(self)
             self._refresh.timeout.connect(self.refresh)
             self._refresh.start(200)
@@ -583,6 +614,8 @@ if _QT_AVAILABLE:
         # =================================================================
         @Slot()
         def refresh(self) -> None:
+            self._update_dock_speed()
+            self._recompute_safety_guidance()
             self.source_badge_changed.emit()
             self.ranges_changed.emit()
             self.trunk_changed.emit()
@@ -642,8 +675,8 @@ if _QT_AVAILABLE:
             'center_line': 'Center',
             'diagonal_left_45deg': '45° Left',
             'diagonal_right_45deg': '45° Right',
-            'c_channel_left': 'Side Left',
-            'c_channel_right': 'Side Right',
+            'c_channel_left': 'Left',
+            'c_channel_right': 'Right',
         }
 
         def _get_docking_range_rows(self):
@@ -669,6 +702,315 @@ if _QT_AVAILABLE:
                     'value': value,
                     'valid': valid,
                 })
+            return rows
+
+        # -- docking safety guidance -------------------------------------------
+        # The guidance is advisory/operator-facing only: it derives a closing
+        # speed from the ``center_line`` gap and maps (speed, gap) onto
+        # SAFE/WARN/DANGER/NO_DATA.  No socket is ever written from this path.
+        #
+        # Least-squares window over which the closing speed is estimated.  A
+        # shrinking gap over ~1.5 s is the platform's forward closing speed.
+        _SPEED_MAX_SAMPLE_AGE_S = 1.5
+
+        def _center_line_distance(self, records=None) -> Optional[float]:
+            """Return the forward ``center_line`` gap (m) or None when absent.
+
+            ``records`` may be supplied by the caller so a single
+            ``snapshot_ranges()`` per refresh serves both this lookup and the
+            docking-range rows.
+            """
+            if records is None:
+                records, _cutter = self.model.snapshot_ranges()
+            for record in (records or []):
+                if not isinstance(record, dict):
+                    continue
+                if record.get('telemetry_key') != 'center_line':
+                    continue
+                if not record.get('valid', False):
+                    return None
+                distance = record.get('distance_m')
+                if distance is None:
+                    return None
+                try:
+                    value = float(distance)
+                except (TypeError, ValueError, OverflowError):
+                    return None
+                # Reject non-finite readings (the wire JSON may carry NaN/Inf):
+                # a non-finite gap is not a usable measurement and would also
+                # disable the fit cache (NaN != NaN).
+                if not math.isfinite(value):
+                    return None
+                return value
+            return None
+
+        def _center_range_receipt_age_s(self) -> Optional[float]:
+            """Local receipt age (s) of the last ``v1/range/docking`` packet.
+
+            Staleness must track when the *wire* delivered a range record, not
+            when the bridge last read the (unchanged) retained JSON.  Using the
+            model's local receipt monotonic time makes a silent range stream age
+            out to NO_DATA.
+            """
+            state = self.model.state('v1/range/docking')
+            if state.last_recv_monotonic_s is None:
+                return None
+            return max(0.0, time.monotonic() - state.last_recv_monotonic_s)
+
+        def _update_dock_speed(self) -> None:
+            """Derive the platform closing speed from the center-range gap.
+
+            Samples the gap once per *new* ``v1/range/docking`` wire packet
+            (keyed on the model's local receipt time, so a repeated read of the
+            retained JSON does not add duplicate samples) and fits the
+            least-squares slope over the window.  The closing speed is the
+            negated slope (a shrinking gap is a positive closing speed), in
+            cm/s.  A missing/invalid/absent center range clears the derived
+            values so staleness drives NO_DATA.
+            """
+            now = time.monotonic()
+            state = self.model.state('v1/range/docking')
+            receipt = state.last_recv_monotonic_s
+            distance = self._center_line_distance()
+            stale = (receipt is None
+                     or (now - receipt) > self.safety_config.stale_s)
+            if distance is None or stale:
+                # No valid/fresh reading: age the window out and clear the
+                # derived values so the guidance reports NO_DATA.
+                self._dock_center_distance = None
+                self._dock_speed_raw = None
+                self._dock_speed_smoothed = None
+                self._dock_speed_fit_key = None
+                while (self._center_samples
+                       and now - self._center_samples[0][0]
+                       > self._SPEED_MAX_SAMPLE_AGE_S):
+                    self._center_samples.popleft()
+                return
+
+            self._dock_center_distance = distance
+            # Sample once per new reading.  Dedup on the (receipt, distance)
+            # pair, not the receipt alone: two packets can share a monotonic
+            # receipt stamp (coarse clock or a caller-supplied recv time) while
+            # carrying different gaps, and dropping the second would freeze the
+            # fitted speed at a stale value while the displayed gap moved.
+            if ((receipt, distance) != self._last_center_sample
+                    or not self._center_samples):
+                self._center_samples.append((receipt, distance))
+                self._last_center_sample = (receipt, distance)
+            while (self._center_samples
+                   and now - self._center_samples[0][0]
+                   > self._SPEED_MAX_SAMPLE_AGE_S):
+                self._center_samples.popleft()
+
+            if len(self._center_samples) < 2:
+                # Not enough samples to fit a slope.  Report NO speed (None),
+                # never 0.0: a zeroed speed would let a stalled stream evaluate
+                # as SAFE (v=0 is "not approaching") while the gap is still
+                # fresh, showing a reassuring green on a DANGER approach.
+                self._dock_speed_raw = None
+                self._dock_speed_fit_key = None
+                return
+            # Reuse the previous fit when the window has not changed since the
+            # last tick (no new sample and nothing pruned), so a 200 ms refresh
+            # over a silent-but-not-yet-stale stream does no repeated work.
+            fit_key = (len(self._center_samples), self._center_samples[0],
+                       self._center_samples[-1])
+            if fit_key == self._dock_speed_fit_key:
+                return
+            times = np.array([s[0] for s in self._center_samples], dtype=np.float64)
+            distances = np.array([s[1] for s in self._center_samples],
+                                 dtype=np.float64)
+            # Least-squares slope of distance vs time: centre BOTH axes
+            # (slope = cov(t, d) / var(t)), so samples at t=0,0.1,... are
+            # handled correctly.
+            times = times - times.mean()
+            denominator = float(np.dot(times, times))
+            if denominator <= 0.0:
+                # All samples share a timestamp (zero variance): no slope is
+                # defined.  Cache the key so an unchanged window is not re-fit
+                # on every 200 ms tick, and report no speed rather than a
+                # fabricated 0.0 (which would read as "not approaching").
+                self._dock_speed_fit_key = fit_key
+                self._dock_speed_raw = None
+                return
+            slope = float(np.dot(times, distances - distances.mean())
+                          / denominator)
+            self._dock_speed_raw = -slope * 100.0
+            self._dock_speed_fit_key = fit_key
+
+        def _recompute_safety_guidance(self) -> None:
+            """EMA-smooth the speed, evaluate, and apply hysteresis debounce.
+
+            ``danger`` and ``no_data`` are adopted immediately; only
+            ``safe``/``warn`` transitions are debounced so the colour cannot
+            flicker at a boundary.  When a state is held, the displayed message
+            matches the *held* state (never a STOP message on an orange banner).
+            """
+            cfg = self.safety_config
+            now = time.monotonic()
+            raw = self._dock_speed_raw
+            if raw is None:
+                self._dock_speed_smoothed = None
+            elif self._dock_speed_smoothed is None:
+                self._dock_speed_smoothed = raw
+            else:
+                alpha = cfg.speed_ema_alpha
+                self._dock_speed_smoothed = (
+                    alpha * raw + (1.0 - alpha) * self._dock_speed_smoothed)
+
+            # Staleness is authoritative on its own: any missing/fresh-less
+            # receipt forces NO_DATA even if a distance or speed is retained, so
+            # the HUD can never show a reassuring state on aged-out telemetry.
+            age = self._center_range_receipt_age_s()
+            stale = age is None or age > cfg.stale_s
+
+            # No fittable speed yet (fewer than two samples in the window) but
+            # the gap is still fresh: the platform may still be closing or may
+            # have stopped, and we cannot tell.  Evaluate with a 0 cm/s speed so
+            # the absolute standoff floor still applies, but never let the
+            # missing speed *lower* an already-issued WARN/DANGER: a DANGER
+            # approach must not flip to SAFE just because the fit window
+            # emptied.  Staleness falls through to the normal evaluation.
+            speed_for_eval = self._dock_speed_smoothed
+            if (speed_for_eval is None
+                    and not stale
+                    and self._dock_center_distance is not None):
+                speed_for_eval = 0.0
+
+            candidate = safety_guidance.evaluate(
+                speed_for_eval, self._dock_center_distance, cfg,
+                stale=stale)
+            if (self._dock_speed_smoothed is None and not stale
+                    and self._guidance_state in (WARN, DANGER)
+                    and candidate.state == SAFE):
+                # Missing speed must not clear a held WARN/DANGER.
+                candidate = candidate.__class__(
+                    self._guidance_state, candidate.ttc_s, candidate.speed_cm_s,
+                    candidate.distance_m, candidate.stop_distance_m,
+                    candidate.max_speed_cm_s, candidate.recommended_speed_cm_s,
+                    safety_guidance.state_message(
+                        self._guidance_state, candidate))
+
+            new_state = candidate.state
+            adopt = (new_state in (DANGER, NO_DATA)
+                     or new_state == self._guidance_state
+                     or (now - self._guidance_state_since) >= cfg.debounce_s)
+            if not adopt:
+                return
+
+            if new_state != self._guidance_state:
+                self._guidance_state = new_state
+                self._guidance_state_since = now
+
+            # Keep the message consistent with the shown (held) state: if the
+            # candidate state was not adopted it cannot differ here, so only the
+            # adopted state's own message is used.  ``state_message`` guards the
+            # case where debounce held the *previous* state.
+            if candidate.state == self._guidance_state:
+                guidance = candidate
+            else:
+                guidance = candidate.__class__(
+                    self._guidance_state, candidate.ttc_s, candidate.speed_cm_s,
+                    candidate.distance_m, candidate.stop_distance_m,
+                    candidate.max_speed_cm_s, candidate.recommended_speed_cm_s,
+                    safety_guidance.state_message(self._guidance_state, candidate))
+
+            if guidance != self._guidance:
+                self._guidance = guidance
+                self.dock_safety_changed.emit()
+
+        def _get_dock_safety_state(self) -> str:
+            return self._guidance_state
+
+        def _get_dock_guidance_text(self) -> str:
+            return self._guidance.message
+
+        def _get_dock_speed_cm_s(self) -> float:
+            return (float('nan') if self._dock_speed_raw is None
+                    else float(self._dock_speed_raw))
+
+        def _get_dock_speed_smoothed_cm_s(self) -> float:
+            return (float('nan') if self._dock_speed_smoothed is None
+                    else float(self._dock_speed_smoothed))
+
+        def _get_dock_center_distance_m(self) -> float:
+            return (float('nan') if self._dock_center_distance is None
+                    else float(self._dock_center_distance))
+
+        def _get_dock_recommended_speed_cm_s(self) -> float:
+            value = self._guidance.recommended_speed_cm_s
+            return float('nan') if value is None else float(value)
+
+        def _get_dock_max_speed_cm_s(self) -> float:
+            value = self._guidance.max_speed_cm_s
+            return float('nan') if value is None else float(value)
+
+        def _get_dock_stop_distance_m(self) -> float:
+            value = self._guidance.stop_distance_m
+            return float('nan') if value is None else float(value)
+
+        def _get_dock_ttc_s(self) -> float:
+            value = self._guidance.ttc_s
+            return float('nan') if value is None else float(value)
+
+        def _get_dock_safety_row(self):
+            """Metric rows for the generic/guidance HUD in the shared shape.
+
+            Values are pre-formatted for display with an em dash when the
+            underlying measurement is absent, matching the docking/boom rows.
+            Captions come from the ``dock_guidance.rows`` config (falling back
+            to the built-in label) so the panel and the config agree.
+            """
+            guidance = self._guidance
+            row_labels = self.hud_config.dock_guidance.rows or {}
+
+            def _label(key: str, fallback: str) -> str:
+                value = row_labels.get(key)
+                return value if isinstance(value, str) and value else fallback
+
+            def _number(value: Optional[float], fmt: str) -> str:
+                if value is None:
+                    return '—'
+                try:
+                    return fmt.format(float(value))
+                except (TypeError, ValueError, OverflowError):
+                    return '—'
+
+            state_label = {
+                'safe': 'APPROACH OK',
+                'warn': 'SLOW',
+                'danger': 'STOP',
+                'no_data': 'NO DATA',
+            }.get(self._guidance_state, self._guidance_state.upper())
+
+            # Report the closing speed magnitude with an explicit direction so a
+            # receding platform is not shown as a negative "closing" speed.
+            if guidance.speed_cm_s is None:
+                speed_value = '—'
+            elif guidance.speed_cm_s > 0.0:
+                speed_value = '{:.1f} cm/s'.format(guidance.speed_cm_s)
+            elif guidance.speed_cm_s < 0.0:
+                speed_value = 'receding {:.1f} cm/s'.format(-guidance.speed_cm_s)
+            else:
+                speed_value = '0.0 cm/s'
+
+            rows = [
+                {'key': 'state', 'label': _label('state', 'State'),
+                 'value': state_label,
+                 'valid': self._guidance_state not in (NO_DATA,)},
+                {'key': 'speed', 'label': _label('speed', 'Closing Speed'),
+                 'value': speed_value,
+                 'valid': guidance.speed_cm_s is not None},
+                {'key': 'gap', 'label': _label('gap', 'Gap'),
+                 'value': _number(guidance.distance_m, '{:.2f} m'),
+                 'valid': guidance.distance_m is not None},
+                {'key': 'ttc', 'label': _label('ttc', 'TTC'),
+                 'value': _number(guidance.ttc_s, '{:.1f} s'),
+                 'valid': guidance.ttc_s is not None},
+                {'key': 'max_speed', 'label': _label('max_speed', 'Max Safe'),
+                 'value': _number(guidance.max_speed_cm_s, '{:.0f} cm/s'),
+                 'valid': guidance.max_speed_cm_s is not None},
+            ]
             return rows
 
         # -- boom / leveling / phase guide -------------------------------------
@@ -963,6 +1305,26 @@ if _QT_AVAILABLE:
         cutterRangeRow = Property(
             'QVariantList', _get_cutter_range_row, notify=ranges_changed)
         phaseGuideLine = Property(str, _get_phase_guide_line, notify=boom_changed)
+        dockSafetyRow = Property(
+            'QVariantList', _get_dock_safety_row, notify=dock_safety_changed)
+        dockSafetyState = Property(
+            str, _get_dock_safety_state, notify=dock_safety_changed)
+        dockGuidanceText = Property(
+            str, _get_dock_guidance_text, notify=dock_safety_changed)
+        dockSpeedCmS = Property(
+            float, _get_dock_speed_cm_s, notify=dock_safety_changed)
+        dockSpeedSmoothedCmS = Property(
+            float, _get_dock_speed_smoothed_cm_s, notify=dock_safety_changed)
+        dockCenterDistanceM = Property(
+            float, _get_dock_center_distance_m, notify=dock_safety_changed)
+        dockRecommendedSpeedCmS = Property(
+            float, _get_dock_recommended_speed_cm_s, notify=dock_safety_changed)
+        dockMaxSpeedCmS = Property(
+            float, _get_dock_max_speed_cm_s, notify=dock_safety_changed)
+        dockStopDistanceM = Property(
+            float, _get_dock_stop_distance_m, notify=dock_safety_changed)
+        dockTtcS = Property(
+            float, _get_dock_ttc_s, notify=dock_safety_changed)
         mqttSensorRows = Property(
             'QVariantList', _get_mqtt_sensor_rows, notify=mqtt_sensors_changed)
         calibrationLine = Property(
