@@ -22,8 +22,10 @@ gateway.
 ## System architecture (memorize this)
 
 ```
-Pi PLC (192.168.50.40, tcp://*:5555, topic harvester.sensors.v1)
-        ──SUB──►  range_ingest.py  ──PUSH──►
+Mosquitto MQTT (192.168.50.100:1883, topic harvester/sensors/v1)  [default PLC source]
+        ──SUB──►  mqtt_ingest.py  ──PUSH──►
+Pi PLC (192.168.50.40, tcp://*:5555, topic harvester.sensors.v1)  [legacy, opt-in]
+        ──SUB──►  range_ingest.py ──PUSH──►   (WITH_RANGE_INGEST=1)
 OAK docking  (192.168.50.21)  ──►  oak_capture.py  ──PUSH──►   aggregator PULL 5570
 OAK cutting  (192.168.50.22)  ──►  oak_capture.py  ──PUSH──►        │ (re-owns seq/source_id)
 MID-360 LiDAR (future)        ──►  lidar_ingest (deferred) ──►      ▼
@@ -152,8 +154,9 @@ PYTHONPATH=canonical_zmq /home/marcop/depthai-env/bin/python3 \
 PYTHONPATH=canonical_zmq /home/marcop/depthai-env/bin/python3 \
   -m canonical_zmq_publisher.main --relay tcp://10.108.137.233:5590
 
-# Full stack (aggregator + OAK adapters + range_ingest + dashboard) — see run_all.sh
+# Full stack (aggregator + OAK adapters + mqtt_ingest + dashboard) — see run_all.sh
 ./run_all.sh foreground        # or default tmux mode
+WITH_RANGE_INGEST=1 ./run_all.sh foreground   # also launch the legacy Pi range_ingest
 
 # Tests (contract + aggregator + adapters)
 PYTHONPATH=canonical_zmq /home/marcop/depthai-env/bin/python3 \

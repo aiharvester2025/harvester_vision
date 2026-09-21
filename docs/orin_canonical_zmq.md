@@ -82,26 +82,90 @@ DISPLAY=:1 PYTHONPATH=harvester_dashboard /usr/bin/python3 \
   -m harvester_dashboard.main --pub tcp://127.0.0.1:5590 --status tcp://127.0.0.1:5600
 ```
 
-Controls: `1` cutter view, `2` docking view (render-only), `3` sensor HUD,
-`4` LiDAR inset, `5` LiDAR projection, `6` camera point-cloud inset,
-`0`/`Esc` clear annotation, click to annotate (shows depth + camera-frame XYZ
-when the OAK depth stream is on). All actions are non-actuating annotations
-only. See `docs/oak_depth_pointcloud.md` for the depth/point-cloud feature.
+Controls: `1` cutter view / toggle the Cutter Range HUD, `2` toggle the Boom +
+Docking HUDs (on the cutter view it returns to the docking camera and shows
+them), `3` operator sensor HUD, `4` LiDAR inset, `5` LiDAR projection, `6`
+camera point-cloud inset, `0`/`Esc` clear annotation, click to annotate (shows
+depth + camera-frame XYZ when the OAK depth stream is on). All actions are
+non-actuating annotations only. See `docs/oak_depth_pointcloud.md` for the
+depth/point-cloud feature.
 
 ### HUD layers (operator vs. developer diagnostics)
 
 The sensor HUD is split into two independently-toggled layers:
 
 - **Operator HUD** (key `3` / "3 HUD" button) — the operational guidance an
-  operator needs: docking phase guide, boom angle/extension/leveling, the five
-  docking ranges, cutter range, trunk estimate, calibration status, the
-  MIXED-SOURCES warning, and the source badge.
+  operator needs: the operator sensor panels (below), docking phase guide, trunk
+  estimate, calibration status, the MIXED-SOURCES warning, and the source badge.
+
+- **Operator sensor panels** (keys `1` and `2`) — three separate, individually
+  configurable panels, shown per the active camera:
+
+  | Panel | Default location | Contents |
+  |---|---|---|
+  | **Boom** | bottom-right | the seven PLC MQTT values: boom angle, boom length, slew angle, platform tilt X1/Y1, prime mover tilt X2/Y2 |
+  | **Docking Ranges** | bottom-left | the docking laser distances (45° left, center, 45° right) + phase guide |
+  | **Cutter Range** | bottom-left | the cutter range reading |
+
+  On startup the docking camera is the default view and the Boom + Docking
+  Range panels are displayed.
+  - Pressing `1` switches to the cutter camera and shows **only** the Cutter
+    Range HUD (Boom and Docking hide immediately). Pressing `1` again while on
+    the cutter view hides/shows the Cutter Range HUD; the camera stays on
+    cutter.
+  - Pressing `2` toggles the Boom + Docking HUDs on the docking camera. On the
+    cutter camera, `2` always returns to the docking camera, hides the Cutter
+    Range HUD, and shows the Boom + Docking HUDs.
+
+  The Boom HUD values are sourced from the PLC MQTT subscriber (the
+  `harvester/sensors/v1` topic mapped by `mqtt_ingest` onto `v1/boom/state`):
+  boom angle, boom length, slew angle, platform tilt X1/Y1, and prime mover
+  tilt X2/Y2.
 
 - **Developer-diagnostic HUD** (key sequence **`7` `7` `7` then `Enter`**) — the
   health overlays useful only when debugging: the bottom per-channel stream
   table ("streams recv … drops …" + age/gaps/decode-errors per channel), the
   toolbar status line ("status … | drops … | rec on/off"), the active-camera
   timestamp line, and the stale-camera red ring.
+
+#### Configuring the operator sensor panels
+
+An admin can move the panels, rename their captions, resize them, and change the
+value/caption font sizes via a JSON file, passed with `--hud-config`:
+
+```bash
+PYTHONPATH=harvester_dashboard /usr/bin/python3 -m harvester_dashboard.main \
+  --pub tcp://127.0.0.1:5590 --status tcp://127.0.0.1:5600 \
+  --hud-config harvester_dashboard/hud_config.json
+```
+
+Without `--hud-config` (or when the file is absent) the built-in defaults are
+used: boom bottom-right, docking ranges bottom-left, large fonts (46 px values,
+30 px captions) sized to be read from ~2 feet. A supplied path that exists but is
+malformed is fatal, so an operator display never boots with a half-applied
+configuration. The shipped `harvester_dashboard/hud_config.json` mirrors the
+defaults and documents every accepted key:
+
+```jsonc
+{
+  "boom": {
+    "visible": true,                 // show this panel at startup
+    "anchor": "bottom-right",        // top|bottom + left|center|right
+    "caption": "BOOM",
+    "width": 520,
+    "height": 0,                     // 0 = auto-size to content
+    "value_font_px": 46,
+    "caption_font_px": 30,
+    "margin_px": 12,
+    "opacity": 0.85,
+    "rows": { "boom_angle_deg": "Boom Angle" }
+  },
+  "docking": { "anchor": "bottom-left", "rows": { "center_line": "Center" } },
+  "cutter_range": { "anchor": "bottom-left", "caption": "CUTTER RANGE" }
+}
+```
+
+Unknown keys are ignored and any omitted key falls back to its default.
 
 Notes on the `777`+`Enter` sequence:
 
@@ -142,17 +206,19 @@ bind the canonical `5590` themselves.
   disables depth, `IMU=0` disables the IMU stream).
 - `lidar_ingest` — **deferred** (MID-360 UDP, XYZ, `v1/lidar/raw`). See
   `.kilo/plans/mid360-lidar-integration.md`.
-- `range_ingest` — **implemented** (see `.kilo/plans/plc-docking-sequence-simulation.md`).
-  Subscribes to the Pi PLC's single-part JSON stream (`tcp://192.168.50.40:5555`,
-  topic `harvester.sensors.v1`) and PUSHes canonical packets for
+- `range_ingest` — **retained but not launched by default**. Subscribes to the
+  Pi PLC's single-part JSON stream (`tcp://192.168.50.40:5555`, topic
+  `harvester.sensors.v1`) and PUSHes canonical packets for
   `v1/range/docking` (the five docking ranges), `v1/boom/state` (boom angle,
-  extension, leveling, phase), and `v1/docking/trunk_estimate`. Launched by
-  `run_all.sh`.
+  extension, leveling, phase), and `v1/docking/trunk_estimate`. `run_all.sh` no
+  longer starts it (the MQTT subscriber supplies the boom/range data); set
+  `WITH_RANGE_INGEST=1` to launch it. See
+  `.kilo/plans/plc-docking-sequence-simulation.md`.
 - `mqtt_ingest` — **implemented**. Subscribes to a Mosquitto MQTT broker
   (`mqtt://192.168.50.100:1883`, topic `harvester/sensors/v1`) that carries the
   Node-RED PLC sensor stream and PUSHes canonical packets for `v1/boom/state`
   (boom angle/extension, platform/primemover tilt, slew angle) and
-  `v1/range/docking` (ultrasonic docking range). Launched by `run_all.sh`
+  `v1/range/docking` (the laser docking distances). Launched by `run_all.sh`
   (configurable via `MQTT_HOST`/`MQTT_PORT`/`MQTT_TOPIC`).
 - `cutter_range_ingest` — **deferred** (`v1/range/cutter`).
 

@@ -166,18 +166,50 @@ deployment. `calibration/frames.deployment.template.json` intentionally leaves
 all physical survey values blank until a measured, approved calibration session
 is recorded.
 
-## MID-360 LiDAR leveling and publishing (pre-implementation)
+## MID-360 LiDAR: on-demand canonical capture
 
-The Orin will ingest the Livox MID-360 without ROS: points arrive over UDP via
-Livox-SDK2 and are republished over ZeroMQ, matching the OAK publisher pattern.
-See `mid360_publisher.py`, `lidar/leveling.py`, `lidar/livox_source.py`, and
-`plc_sensor_bridge.py`.
+The Orin ingests the Livox MID-360 without ROS: points arrive over UDP via
+Livox-SDK2 and are republished onto the canonical bus as `v1/lidar/raw`
+(`codec: lidar_xyz_f32`), matching the OAK publisher pattern. See
+`canonical_zmq/canonical_zmq_publisher/lidar_capture.py` (the producer),
+`lidar/livox_source.py` (the only file that touches the Livox SDK),
+`lidar/leveling.py`, and `plc_sensor_bridge.py`.
 
-**Leveling.** The LiDAR is arm-mounted, so raw points rotate with arm pitch/roll
-and a world-vertical tree appears to lean. Leveling re-aligns the cloud to
-gravity using orientation *only* (rotation-only, no translation), so the sensor
-stays at the HUD origin while the tree stands straight. Yaw is not required and
-is deliberately unused (IMU yaw drifts; the 2-axis tilt sensor has no yaw).
+**Network (sensor LAN `192.168.50.0/24`).** The MID-360 is addressed at
+`192.168.50.30`; the Orin host runs the SDK at `192.168.50.10`. The LiDAR IP is
+recorded in `calibration/frames.deployment.template.json` (`lidar_binding`),
+and the SDK2 config is `mid360_config.json`.
+
+**On-demand operation.** The LiDAR does not stream 24/7: the producer starts
+idle, and in `livox-sdk` mode the SDK is not even started until the operator
+enables it, so there is no UDP stream while idle. The control channel is a PULL
+socket accepting `{"enabled": true|false}`, the same contract the OAK publishers
+use. While disabled the backlog is discarded and nothing is published.
+
+The control socket binds **loopback by default** (`tcp://127.0.0.1:5571`)
+because the channel is unauthenticated. To control the LiDAR from another host,
+set `LIDAR_CONTROL_ENDPOINT=tcp://*:5571` (or pass `--control-endpoint`) and only
+do so on the trusted sensor LAN.
+
+```bash
+# On the Orin (default loopback bind):
+python3 -c "import zmq; s=zmq.Context().socket(zmq.PUSH); \
+  s.connect('tcp://127.0.0.1:5571'); s.send_json({'enabled': True})"
+```
+
+The same channel can be reached over SSH without exposing the port:
+
+```bash
+ssh marcop@<orin> "python3 -c \"import zmq; s=zmq.Context().socket(zmq.PUSH); \
+  s.connect('tcp://127.0.0.1:5571'); s.send_json({'enabled': True})\""
+```
+
+**Pipeline.** Each scan is drained from the SDK, leveled to gravity
+(rotation-only; the sensor stays at the HUD origin), clipped to a **120°
+forward sector** and to `[0.15, 40] m`, then downsampled to `--max-points`
+(default 2000). Leveling re-aligns the cloud to gravity using orientation
+*only* (rotation-only, no translation). Yaw is not required and is deliberately
+unused (IMU yaw drifts; the 2-axis tilt sensor has no yaw).
 
 Three orientation sources are supported via `--level-source`:
 - `imu`  — MID-360 built-in IMU (pitch/roll are gravity-referenced and stable).
@@ -188,11 +220,85 @@ The MID-360's native vendor frame differs from the project's `+X forward /
 +Y left / +Z up` mechanical convention; confirm the installed vendor frame and
 convert it in `lidar/livox_source.py` before commissioning.
 
-Run offline (no hardware) to exercise the ZMQ/leveling plumbing:
+### Building Livox-SDK2 (required for `--sdk-mode livox-sdk`)
+
+The SDK shared library is **not** shipped in this repo. Build it once on the
+Orin so `liblivox_lidar_sdk_shared.so` is on the loader path:
 
 ```bash
-python3 mid360_publisher.py --sdk-mode synthetic
+git clone https://github.com/Livox-SDK/Livox-SDK2.git
+cd Livox-SDK2 && mkdir build && cd build
+cmake .. && make -j"$(nproc)" && sudo make install
+sudo ldconfig
 ```
+
+### Sensor-LAN requirements (learned on real hardware)
+
+Two network conditions are mandatory; without them detection succeeds but **no
+points ever arrive**:
+
+1. **The multicast group must route via the sensor interface.** The SDK joins
+   `224.1.1.5` on whichever interface the routing table selects; if the default
+   route is the wifi/LAN NIC, the group is joined on the wrong port and the
+   LiDAR data is dropped. A dispatcher script installs this persistently:
+
+   ```bash
+   # /etc/NetworkManager/dispatcher.d/90-livox-multicast
+   SENSOR_IF=eth1
+   if [ "$1" = "$SENSOR_IF" ] && [ "$2" = "up" ]; then
+       # Guard: if the interface name was not the sensor NIC, routing the group
+       # here silently sends LiDAR data off the wrong device. Fail loudly instead.
+       if ! ip -o link show "$SENSOR_IF" >/dev/null 2>&1; then
+           logger -t livox-multicast "sensor interface $SENSOR_IF not present; skipping"
+           exit 1
+       fi
+       ip route replace 224.1.1.5/32 dev "$SENSOR_IF" scope link
+   fi
+   ```
+
+   Confirm the sensor NIC name before relying on this: the interface is `eth1`
+   on the current Orin, but a renamed or rebound NIC would need `SENSOR_IF`
+   changed to match. Verify: `ip maddr show dev eth1 | grep 224.1.1.5` (must be
+   present) and `ip route get 224.1.1.5` (must say `dev eth1`).
+
+2. **The LiDAR must send to the multicast group.** The SDK socket is bound to
+   `224.1.1.5:56301`, so a LiDAR left on its default unicast destination
+   (`192.168.50.10:56301`) is never received. The adapter sends
+   `SetLivoxLidarPointDataHostIPCfg` / `...ImuDataHostIPCfg` for `224.1.1.5`
+   **before** starting the motor; see `_start_device()` in `livox_source.py`.
+
+Also note the SDK does **not** emit `SetLivoxLidarInfoChangeCallback` on the
+non-view path for normal firmware (its `is_load_mode` guard is inverted), so the
+adapter starts the device via a poll fallback keyed on `--lidar-ip` rather than
+waiting for that callback.
+
+### Running
+
+Offline (no hardware), exercising the full canonical path:
+
+```bash
+PYTHONPATH=canonical_zmq:. python3 -m canonical_zmq_publisher.lidar_capture \
+    --sdk-mode synthetic --enabled
+```
+
+Live MID-360 (starts idle; enable over the control socket):
+
+```bash
+PYTHONPATH=canonical_zmq:. python3 -m canonical_zmq_publisher.lidar_capture \
+    --sdk-mode livox-sdk --sdk-config ./mid360_config.json \
+    --level-source imu --sector-deg 120 --max-points 2000
+```
+
+The whole stack (aggregator + LiDAR + dashboard, **cameras off**) is one call:
+
+```bash
+./run_all.sh              # CAMERAS=0 (default) and LIDAR=1 (default)
+CAMERAS=1 ./run_all.sh    # re-enable the two OAK adapters
+LIDAR_MODE=livox-sdk ./run_all.sh   # drive the real sensor
+```
+
+The dashboard already decodes `v1/lidar/raw` through `LidarDecoder` and renders
+it in `LidarInset.qml`; no dashboard change is needed.
 
 **PLC/Modbus bridge.** `plc_sensor_bridge.py` is a skeleton that will poll the
 PLC (boom angle, 2-axis tilt, five range sensors) and republish as MessagePack

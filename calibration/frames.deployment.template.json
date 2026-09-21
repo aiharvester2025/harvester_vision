@@ -50,6 +50,7 @@
   },
   "lidar_binding": {
     "device": "MID-360",
+    "device_address": "192.168.50.30",
     "frame_id": "mid360_link",
     "serial": null,
     "extrinsics_artifact": "pending",

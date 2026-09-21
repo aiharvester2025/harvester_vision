@@ -28,11 +28,16 @@ QML**, and it is strictly **render-only** (no socket writes from view/toggle con
   `refresh()`.
 - **QML** `harvester_dashboard/qml/`:
   - `Dashboard.qml` — root layout + keyboard handling + toolbar.
-  - `HudOverlay.qml` — MIXED-SOURCES warning, left `SensorPanel`, right trunk/calibration, bottom
-    stream-errors panel (diagnostic-gated).
-  - `SensorPanel.qml` — phase guide (`phaseGuideLine`), boom angle/extension/leveling
-    (`boomAngleLine`/`boomExtensionLine`/`levelLine`), docking range rows (`dockingRangeRows`),
-    cutter range (`cutterRangeLine`).
+  - `HudOverlay.qml` — MIXED-SOURCES warning, the operator sensor panels host
+    (`SensorPanel`), right trunk/calibration, bottom stream-errors panel
+    (diagnostic-gated).
+  - `SensorPanel.qml` — hosts the three config-driven operator panels in Loaders,
+    anchored from `bridge.hudLayout`: **Boom** (bottom-right; PLC MQTT values:
+    boom angle, boom length, slew angle, platform tilt X1/Y1, prime mover tilt
+    X2/Y2), **Docking Ranges** (bottom-left, + phase guide), **Cutter Range**
+    (cutter view only).
+  - `SensorHudPanel.qml` — generic panel (caption + caption/value rows) driven by
+    a `bridge.hudLayout.<name>` config object and a rows model.
   - `CameraView.qml` — camera image (image://frames), stale ring + timestamp line
     (diagnostic-gated), click annotation, crosshair.
   - `LidarInset.qml`, `PointCloudInset.qml`, `Annotation.qml` — inset overlays.
@@ -41,8 +46,16 @@ QML**, and it is strictly **render-only** (no socket writes from view/toggle con
 
 The HUD is split into two independently-toggled layers:
 
-- **Operator HUD** (key `3` → `bridge.hudVisible`): phase guide, boom/leveling, docking ranges,
-  cutter range, trunk + calibration, MIXED-SOURCES warning, source badge.
+- **Operator HUD** (key `3` → `bridge.hudVisible`): phase guide, trunk +
+  calibration, MIXED-SOURCES warning, source badge.
+- **Operator sensor panels** (key `2` → `bridge.operatorHudsVisible` + key `1`
+  → `bridge.cutterHudVisible`): Boom + Docking Ranges on the docking camera, and
+  the Cutter Range panel on the cutter camera. Key `1` switches to cutter and
+  shows only the Cutter HUD (Boom/Docking hide); pressed again on cutter it
+  hides/shows the Cutter HUD. Key `2` toggles Boom+Docking on the docking
+  camera, and on the cutter camera it returns to docking, hides the Cutter HUD,
+  and shows Boom+Docking. Layout/captions/sizes are admin-set via `--hud-config`
+  (see `harvester_dashboard/hud_config.py`).
 - **Developer-diagnostic HUD** (`7` `7` `7` + `Enter` → `bridge.diagnosticVisible`): bottom
   stream table, toolbar status line, active-camera timestamp line, stale-camera ring.
 
@@ -62,9 +75,11 @@ line).
 
 Buffering **every** digit would add an 800 ms delay to all primary controls — do not do that.
 
-Full key map (render-only unless noted): `1` cutter view, `2` docking view, `3` HUD, `4` LiDAR
-inset, `5` LiDAR view cycle, `6` point cloud, `7` IMU stabilization A/B, `0`/`Esc` clear
-annotation, `777`+`Enter` diagnostic layer, click = annotate (depth + camera-frame XYZ).
+Full key map (render-only unless noted): `1` cutter view / toggle Cutter Range
+HUD, `2` toggle Boom+Docking HUDs (on cutter: back to docking + show them), `3`
+operator HUD, `4` LiDAR inset, `5` LiDAR view cycle, `6` point cloud, `7` IMU
+stabilization A/B, `0`/`Esc` clear annotation, `777`+`Enter` diagnostic layer,
+click = annotate (depth + camera-frame XYZ).
 
 ## Surface a new JSON channel (worked example: `v1/boom/state`)
 

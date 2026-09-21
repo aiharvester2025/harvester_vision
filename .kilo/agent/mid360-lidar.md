@@ -88,6 +88,12 @@ https://livox-wiki-en.readthedocs.io/en/latest/tutorials/new_product/mid360/mid3
 
 ## SDK2 config (MID360 key — shared by Mid-360 and Mid-360S)
 
+**Project deployment (sensor LAN `192.168.50.0/24`):** LiDAR `192.168.50.30`,
+host (Orin) `192.168.50.10`. Recorded in
+`calibration/frames.deployment.template.json` (`lidar_binding.device_address`).
+The JSON below is Livox's stock example (`192.168.1.x`) — substitute the
+project addresses when writing the real config.
+
 ```json
 {
   "MID360": {
