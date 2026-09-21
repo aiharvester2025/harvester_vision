@@ -41,13 +41,15 @@ import zmq
 from harvester_telemetry_contract import pack_message
 
 
-# The docking/range sensors this adapter emits.  The live payload only carries a
-# single "Ultrasonic Left" reading today, but the canonical ``v1/range/docking``
-# channel expects a list of telemetry-keyed records; we emit the ultrasonic
-# reading as the sole record with a stable frame_id.  Additional sensors can be
+# The docking/range sensors this adapter emits.  The payload carries the three
+# laser distance readings (left/center/right); the canonical
+# ``v1/range/docking`` channel expects a list of telemetry-keyed records, so we
+# emit one record per laser with a stable frame_id.  Additional sensors can be
 # appended here as the Node-RED stream grows without changing the contract.
 SENSOR_BINDINGS = [
-    ("ultrasonic_left", "sensor_ultrasonic_left_frame"),
+    ("diagonal_left_45deg", "sensor_diagonal_left_frame", "Laser Distance Left"),
+    ("center_line", "sensor_center_line_frame", "Laser Distance Center"),
+    ("diagonal_right_45deg", "sensor_diagonal_right_frame", "Laser Distance Right"),
 ]
 
 CALIBRATION_ID = "mqtt_plc_provisional_v0"
@@ -114,9 +116,11 @@ def map_docking_records(payload):
     if not isinstance(payload, dict):
         payload = {}
     records = []
-    for telemetry_key, frame_id in SENSOR_BINDINGS:
-        wire_key = {'ultrasonic_left': 'Ultrasonic Left'}.get(telemetry_key)
-        distance = _as_float(payload.get(wire_key)) if wire_key else None
+    for telemetry_key, frame_id, wire_key in SENSOR_BINDINGS:
+        distance = _as_float(payload.get(wire_key))
+        if distance is None and wire_key == 'Laser Distance Right':
+            # The PLC stream occasionally misspells the right sensor key.
+            distance = _as_float(payload.get('Laser Distanec Right'))
         valid = distance is not None
         records.append({
             'telemetry_key': telemetry_key,
@@ -126,7 +130,7 @@ def map_docking_records(payload):
             'acquisition_timestamp_ns': time.time_ns(),
             'calibration_id': CALIBRATION_ID,
             'min_range_m': 0.02,
-            'max_range_m': 4.0,
+            'max_range_m': 8.0,
         })
     return records
 

@@ -49,25 +49,46 @@ class BoomStateMappingTest(unittest.TestCase):
 
 
 class DockingRecordMappingTest(unittest.TestCase):
-    def test_maps_ultrasonic_reading(self):
-        payload = {'Ultrasonic Left': 4.92}
+    def test_maps_laser_distances(self):
+        payload = {
+            'Laser Distance Left': 4.897,
+            'Laser Distance Center': 5.152,
+            'Laser Distance Right': 5.104,
+        }
         records = map_docking_records(payload)
-        self.assertEqual(len(records), 1)
-        self.assertEqual(records[0]['telemetry_key'], 'ultrasonic_left')
-        self.assertEqual(records[0]['frame_id'], 'sensor_ultrasonic_left_frame')
-        self.assertAlmostEqual(records[0]['distance_m'], 4.92)
-        self.assertTrue(records[0]['valid'])
+        by_key = {r['telemetry_key']: r for r in records}
+        self.assertEqual(set(by_key), {
+            'diagonal_left_45deg', 'center_line', 'diagonal_right_45deg'})
+        self.assertAlmostEqual(by_key['diagonal_left_45deg']['distance_m'], 4.897)
+        self.assertAlmostEqual(by_key['center_line']['distance_m'], 5.152)
+        self.assertAlmostEqual(by_key['diagonal_right_45deg']['distance_m'], 5.104)
+        self.assertTrue(all(r['valid'] for r in records))
 
-    def test_missing_ultrasonic_is_invalid(self):
+    def test_right_key_typo_is_tolerated(self):
+        # The PLC stream sometimes misspells the right sensor key.
+        records = map_docking_records({'Laser Distanec Right': 5.104})
+        by_key = {r['telemetry_key']: r for r in records}
+        self.assertAlmostEqual(
+            by_key['diagonal_right_45deg']['distance_m'], 5.104)
+        self.assertTrue(by_key['diagonal_right_45deg']['valid'])
+
+    def test_missing_distances_are_invalid(self):
         records = map_docking_records({})
-        self.assertEqual(len(records), 1)
-        self.assertIsNone(records[0]['distance_m'])
-        self.assertFalse(records[0]['valid'])
+        self.assertEqual(len(records), 3)
+        self.assertTrue(all(not r['valid'] for r in records))
+        self.assertTrue(all(r['distance_m'] is None for r in records))
 
-    def test_null_slew_angle_treated_as_none(self):
-        records = map_docking_records({'Ultrasonic Left': None})
-        self.assertIsNone(records[0]['distance_m'])
-        self.assertFalse(records[0]['valid'])
+    def test_null_distance_treated_as_invalid(self):
+        records = map_docking_records({'Laser Distance Center': None})
+        by_key = {r['telemetry_key']: r for r in records}
+        self.assertIsNone(by_key['center_line']['distance_m'])
+        self.assertFalse(by_key['center_line']['valid'])
+
+    def test_bindings_shape(self):
+        for telemetry_key, frame_id, wire_key in SENSOR_BINDINGS:
+            self.assertTrue(telemetry_key)
+            self.assertTrue(frame_id)
+            self.assertTrue(wire_key)
 
 
 if __name__ == '__main__':
