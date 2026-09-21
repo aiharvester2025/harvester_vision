@@ -7,6 +7,9 @@ import unittest
 
 from lidar.livox_source import (
     LivoxMid360Source,
+    WORK_MODE_NORMAL,
+    WORK_MODE_UNVERIFIED_STOP,
+    WORK_MODE_WAKE_UP,
     _accel_to_quaternion,
     _decode_point_batch,
     _ETH_PACKET_HEADER_SIZE_BYTES,
@@ -173,6 +176,35 @@ class DataDestinationTests(unittest.TestCase):
         source = LivoxMid360Source(level_source="imu", auto_start=False,
                                    lidar_ip=None)
         self.assertFalse(source._poll_for_device(timeout_s=0.1))
+
+
+class WorkModeTests(unittest.TestCase):
+    """The stop mode must be the documented WakeUp, not the legacy 0x09."""
+
+    def test_stop_mode_is_the_documented_wake_up(self):
+        # Verified on hardware: the device reports mode 2 and the point rate
+        # falls to 0. This is also what Livox Viewer 2's "Standby" sets.
+        # The value must match kLivoxLidarWakeUp in livox_lidar_def.h.
+        self.assertEqual(WORK_MODE_WAKE_UP, 0x02)
+
+    def test_start_mode_is_normal(self):
+        # Matches kLivoxLidarNormal in livox_lidar_def.h.
+        self.assertEqual(WORK_MODE_NORMAL, 0x01)
+
+    def test_starting_requires_the_point_data_type_step(self):
+        # Without SetLivoxLidarPclDataType the device accepts Normal (ret=0) but
+        # never spins, which is what made every stop mode look ineffective. The
+        # start sequence must therefore set the type before the work mode.
+        import inspect
+        source = inspect.getsource(LivoxMid360Source._start_device)
+        self.assertIn('set_point_data_type', source)
+        self.assertLess(source.index('set_point_data_type'),
+                        source.index('set_work_mode'))
+
+    def test_legacy_stop_value_is_not_presented_as_the_stop(self):
+        # 0x09 is retained only for compatibility and must not be the default.
+        self.assertNotEqual(WORK_MODE_UNVERIFIED_STOP, WORK_MODE_WAKE_UP)
+        self.assertEqual(WORK_MODE_UNVERIFIED_STOP, 0x09)
 
 
 class SourceLifecycleTests(unittest.TestCase):

@@ -47,19 +47,35 @@ DEFAULT_SDK_LIBRARY = "liblivox_lidar_sdk_shared.so"
 
 # LivoxLidarWorkMode / LivoxLidarPointDataType (livox_lidar_def.h).
 WORK_MODE_NORMAL = 0x01
-# Documented "sleep", but the deployment MID-360 REJECTS it (ret_code=3,
-# error_key=26). Kept only for reference/tests; use WORK_MODE_MOTOR_STOP to halt.
+# ``kLivoxLidarWakeUp``. This is the mode to stop the motor with, and it is the
+# one Livox Viewer 2's "Standby" action sets (verified by watching the device's
+# own broadcast work-mode field change to 2 while the Viewer ran).
+#
+# Verified on the deployment unit, with a fresh SDK and the device running:
+#   set Normal (1)  -> device reports 1, ~2083 point packets/s
+#   set WakeUp (2)  -> device reports 2, 0 packets/s, and stays stopped
+# The motor halts and the mode is a documented enum value, so no undocumented
+# command is needed.
+#
+# IMPORTANT: a stop only works if the device was actually started, and starting
+# requires ``SetLivoxLidarPclDataType`` (see ``POINT_TYPE_CARTESIAN_HIGH``) before
+# ``Normal``. Without that call the device ACCEPTS ``Normal`` and reports
+# ``ret=0`` but never spins, which makes every stop mode appear to do nothing.
+# That is what previously led this adapter to use the undocumented value 0x09
+# below; the real fault was an incomplete start sequence, not a rejecting device.
+WORK_MODE_WAKE_UP = 0x02
+# ``kLivoxLidarSleep``. Rejected by this firmware while the device is running
+# (ret_code=3, error_key=26). Kept for reference/tests only; use
+# ``WORK_MODE_WAKE_UP`` to stop.
 WORK_MODE_SLEEP = 0x03
-# Undocumented motor-stop mode used by Livox Viewer ("StandBy"/"PowerSaving").
-# The value is NOT in the installed SDK2 ``LivoxLidarWorkMode`` enum (which stops
-# at 0x08 ``kLivoxLidarUpgrade``), but the MID-360 accepts it and it is what
-# actually halts the motor. Verified on the deployment unit: ``SetLivoxLidarWorkMode(0x09)``
-# returns 0 and the point rate drops to 0 and STAYS at 0 after the SDK unloads.
-# Every documented stop path is rejected or ineffective on this firmware:
-# 0x03 Sleep -> ret=3 err=26 rejected; 0x07 MotorStoping -> rejected;
-# ``DisableLivoxLidarPointSend`` -> ret=32 err=3 rejected; ``reboot`` -> device
-# rescans on boot. Do not substitute a documented value here.
-WORK_MODE_MOTOR_STOP = 0x09
+# Retained for backwards compatibility with earlier deployments and callers.
+#
+# This value is NOT in the installed SDK2 ``LivoxLidarWorkMode`` enum (which ends
+# at 0x08 ``kLivoxLidarUpgrade``). It happens to halt the motor, but it was only
+# ever needed because of the incomplete start sequence described above, and it
+# leaves the device reporting a mode value the SDK does not define. Prefer
+# ``WORK_MODE_WAKE_UP``; do not use this for new code.
+WORK_MODE_UNVERIFIED_STOP = 0x09
 POINT_TYPE_CARTESIAN_HIGH = 0x01  # 14-byte single-return point
 
 # The MID-360 powers up in standby: after detection the SDK must send
@@ -526,14 +542,24 @@ class _SdkBindings:
         return int(self.lib.SetLivoxLidarWorkMode(handle, work_mode, None, None))
 
     def stop_motor(self, handle: int) -> int:
-        """Halt the LiDAR motor with the undocumented work-mode ``0x09``.
+        """Halt the LiDAR motor by putting it in ``WakeUp`` (standby).
 
-        This is the command Livox Viewer issues for its stop/standby option. It
-        is not in the SDK2 enum but the MID-360 accepts it, and the motor stays
-        halted after the SDK is unloaded (verified on the deployment unit).
+        This is the documented ``kLivoxLidarWakeUp`` mode, and it is what Livox
+        Viewer 2's "Standby" action sets. Verified on the deployment unit: the
+        device reports mode 2 and the point rate falls to 0 and stays there.
         """
         return int(self.lib.SetLivoxLidarWorkMode(
-            handle, WORK_MODE_MOTOR_STOP, None, None))
+            handle, WORK_MODE_WAKE_UP, None, None))
+
+    def stop_motor_unverified(self, handle: int) -> int:
+        """Legacy stop using the undocumented ``0x09``.
+
+        Kept only so existing callers keep working. Prefer :meth:`stop_motor`;
+        ``0x09`` is not in the SDK enum and leaves the device reporting a mode
+        the SDK cannot name, so it should not be used for new code.
+        """
+        return int(self.lib.SetLivoxLidarWorkMode(
+            handle, WORK_MODE_UNVERIFIED_STOP, None, None))
 
     def reboot(self, handle: int) -> int:
         """Reboot the device.
@@ -728,13 +754,12 @@ class LivoxMid360Source:
     def close(self, stop_motor: bool = True) -> None:
         """Stop streaming and release the SDK.
 
-        ``stop_motor`` halts the spinning motor before the SDK is unloaded.
+        ``stop_motor`` puts the device in ``WakeUp`` (standby) before the SDK is
+        unloaded, which halts the motor. ``WakeUp`` is a documented mode and is
+        what Livox Viewer 2's "Standby" sets; see ``WORK_MODE_WAKE_UP``.
 
-        The MID-360 refuses every documented stop path while running (``Sleep``
-        returns ret_code=3/error_key=26, ``MotorStoping`` is rejected, and
-        disabling the point stream is rejected), and a reboot does not help
-        because the device rescans on boot. The mode that actually works is the
-        undocumented ``0x09`` used by Livox Viewer; see ``WORK_MODE_MOTOR_STOP``.
+        A reboot is deliberately not used: the MID-360 rescans on boot, so the
+        motor comes back within seconds.
         """
         if not self._running:
             return
@@ -743,8 +768,8 @@ class LivoxMid360Source:
         bindings, self._bindings = self._bindings, None
         if bindings is not None:
             if stop_motor:
-                # 0x09 is the only value that halts the motor on this firmware;
-                # it is durable across SDK unload, so a settle period is enough.
+                # WakeUp is durable across SDK unload, so a short settle period
+                # is enough before releasing the SDK.
                 for handle in self._handles:
                     try:
                         bindings.stop_motor(handle)
