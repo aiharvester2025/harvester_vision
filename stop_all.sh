@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Stop every process of the Orin canonical telemetry stack.
 #
-# Kills: the canonical aggregator, both OAK capture adapters, and the dashboard.
+# Kills: the canonical aggregator, both OAK capture adapters, the MQTT ingest,
+# any legacy Pi range_ingest (kept so an opt-in WITH_RANGE_INGEST=1 run is torn
+# down too), and the dashboard.
 # Idempotent — safe to run even when nothing is running.
 
 set -uo pipefail
@@ -9,6 +11,7 @@ set -uo pipefail
 PATTERNS=(
   "canonical_zmq_publisher.main"
   "canonical_zmq_publisher.oak_capture"
+  "canonical_zmq_publisher.lidar_capture"
   "canonical_zmq_publisher.range_ingest"
   "canonical_zmq_publisher.mqtt_ingest"
   "harvester_dashboard.main"
