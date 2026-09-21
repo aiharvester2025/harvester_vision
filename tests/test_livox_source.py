@@ -1,4 +1,5 @@
 import json
+import ctypes
 import math
 import struct
 import tempfile
@@ -8,7 +9,15 @@ from lidar.livox_source import (
     LivoxMid360Source,
     _accel_to_quaternion,
     _decode_point_batch,
+    _ETH_PACKET_HEADER_SIZE_BYTES,
+    _EthPacketHeader,
+    _MAX_IMU_PER_CALLBACK,
+    _MAX_POINTS_PER_CALLBACK,
+    _payload_view,
+    _RAW_IMU_SIZE_BYTES,
+    _RAW_POINT_SIZE_BYTES,
     _resolve_axis,
+    _SDK_CALLBACK_BUFFER_BYTES,
     default_sdk_config,
     write_default_sdk_config,
 )
@@ -35,6 +44,32 @@ class PointDecodingTests(unittest.TestCase):
     def test_count_larger_than_buffer_is_clamped(self):
         raw = self._pack(1, 2, 3)
         self.assertEqual(_decode_point_batch(raw, 99), [(1.0, 2.0, 3.0)])
+
+    def test_callback_caps_cannot_exceed_the_sdk_buffer(self):
+        # The SDK hands the callback a fixed 8192-byte buffer, so a cap larger
+        # than that buffer can hold would let a corrupt packet over-read it.
+        self.assertLessEqual(
+            _MAX_POINTS_PER_CALLBACK * _RAW_POINT_SIZE_BYTES,
+            _SDK_CALLBACK_BUFFER_BYTES - _ETH_PACKET_HEADER_SIZE_BYTES)
+        self.assertLessEqual(
+            _MAX_IMU_PER_CALLBACK * _RAW_IMU_SIZE_BYTES,
+            _SDK_CALLBACK_BUFFER_BYTES - _ETH_PACKET_HEADER_SIZE_BYTES)
+
+    def test_payload_view_clamps_a_lying_packet_to_the_buffer(self):
+        # A packet claiming far more points than it could hold must still be
+        # clamped to the buffer, not read out of bounds.
+        buffer = (ctypes.c_uint8 * _SDK_CALLBACK_BUFFER_BYTES)()
+        address = ctypes.addressof(buffer)
+        header = ctypes.cast(
+            address, ctypes.POINTER(_EthPacketHeader)).contents
+        header.dot_num = 65535
+        header.length = 65535
+        view = _payload_view(address, 65535, _RAW_POINT_SIZE_BYTES)
+        self.assertIsNotNone(view)
+        self.assertLessEqual(
+            view.size, _SDK_CALLBACK_BUFFER_BYTES - _ETH_PACKET_HEADER_SIZE_BYTES)
+        self.assertEqual(
+            view.size // _RAW_POINT_SIZE_BYTES, _MAX_POINTS_PER_CALLBACK)
 
 
 class VendorFrameTests(unittest.TestCase):

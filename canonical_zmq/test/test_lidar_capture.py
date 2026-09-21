@@ -52,6 +52,15 @@ class HeaderTest(unittest.TestCase):
         self.assertEqual(len(blob), POINT_STRIDE_BYTES)
         self.assertEqual([f['type'] for f in POINT_FIELDS], ['float32'] * 3)
 
+    def test_pack_points_accepts_a_numpy_array(self):
+        # A (N, 3) array with more than one row used to raise "truth value of an
+        # array is ambiguous" from the emptiness check.
+        import numpy as np
+        rows = [(1.0, 2.0, 3.0), (4.0, 5.0, 6.0)]
+        self.assertEqual(
+            pack_points(np.asarray(rows, dtype='<f4')),
+            pack_points(rows))
+
 
 class SectorFilterTest(unittest.TestCase):
     def test_keeps_forward_and_drops_behind(self):

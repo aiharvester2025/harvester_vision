@@ -272,6 +272,10 @@ relaunch to confirm.
 ## Open Defaults Chosen (adjustable during implementation)
 
 - Phase guide stays with the Docking HUD as a subtitle row.
-- `operatorHudsVisible` default = `hud_layout.boom.visible && hud_layout.docking.visible`
-  (true by default), so startup shows Boom + Docking HUDs as requested.
+- `operatorHudsVisible` default = `hud_layout.boom.visible || hud_layout.docking.visible`
+  (true by default), so startup shows Boom + Docking HUDs as requested. Use OR, not AND:
+  each of those two panels is additionally gated on its own `visible` config in the QML,
+  so the toggle must be on while *either* is enabled; with AND, disabling just one panel
+  would start the toggle off and make the first key `2` press show rather than hide.
+  `cutter_range` is excluded — it is gated on the cutter view, not on this flag.
 - Cutter Range HUD is always gated on the cutter view being active, regardless of key `2`.

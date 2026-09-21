@@ -149,16 +149,20 @@ def default_hud_layout() -> HudLayoutConfig:
 
 
 def _as_int(value: Any, fallback: int) -> int:
+    # OverflowError is caught because json accepts the Infinity/NaN literals by
+    # default, and int(float('inf')) raises OverflowError rather than ValueError.
+    # Without it a config like {"width": Infinity} crashed with a traceback
+    # instead of the documented fatal SystemExit.
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return fallback
 
 
 def _as_float(value: Any, fallback: float) -> float:
     try:
         return float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return fallback
 
 
@@ -210,6 +214,11 @@ def _merge_panel(base: HudPanelConfig, raw: Any, name: str) -> HudPanelConfig:
     )
 
 
+def _reject_non_finite(literal: str) -> float:
+    """Raise for the non-standard ``Infinity``/``-Infinity``/``NaN`` JSON literals."""
+    raise ValueError('{} is not a valid number in a hud config'.format(literal))
+
+
 def load_hud_config(path: Optional[str]) -> HudLayoutConfig:
     """Load the admin HUD layout, falling back to built-in defaults.
 
@@ -222,8 +231,13 @@ def load_hud_config(path: Optional[str]) -> HudLayoutConfig:
         return layout
 
     try:
+        # parse_constant rejects the non-standard Infinity/-Infinity/NaN literals
+        # that Python's json accepts by default. They are not valid JSON, cannot
+        # be laid out, and silently coerced to a default they would hide a broken
+        # config, so treat them as malformed and fail fast like any other bad
+        # value.
         with open(path, 'r', encoding='utf-8') as handle:
-            data = json.load(handle)
+            data = json.load(handle, parse_constant=_reject_non_finite)
     except FileNotFoundError:
         return layout
     except (OSError, ValueError) as exc:

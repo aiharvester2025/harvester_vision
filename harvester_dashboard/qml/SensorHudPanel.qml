@@ -17,9 +17,11 @@ Rectangle {
     readonly property int valueFontPx: layout ? layout.valueFontPx : 40
     readonly property int captionFontPx: layout ? layout.captionFontPx : 26
     readonly property int panelWidth: layout ? layout.width : 520
+    // Config height, or 0 to auto-size to the content (the documented default).
+    readonly property int panelHeight: layout ? layout.height : 0
 
     width: panelWidth
-    height: content.height + 28
+    height: panelHeight > 0 ? panelHeight : content.height + 28
     radius: 8
     color: "#000000"
     opacity: layout ? layout.opacity : 0.85

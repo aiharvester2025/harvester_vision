@@ -7,6 +7,23 @@ import unittest
 
 from harvester_dashboard.hud_config import (
     default_hud_layout, load_hud_config)
+from harvester_dashboard.hud_config import HudLayoutConfig, HudPanelConfig
+
+
+def _layout_with(boom_visible: bool, docking_visible: bool,
+                 cutter_visible: bool) -> HudLayoutConfig:
+    base = default_hud_layout()
+
+    def panel(source, visible):
+        fields = dict(source.__dict__)
+        fields['visible'] = visible
+        return HudPanelConfig(**fields)
+
+    return HudLayoutConfig(
+        boom=panel(base.boom, boom_visible),
+        docking=panel(base.docking, docking_visible),
+        cutter_range=panel(base.cutter_range, cutter_visible),
+    )
 
 
 class HudConfigDefaultsTest(unittest.TestCase):
@@ -110,6 +127,68 @@ class HudConfigOverrideTest(unittest.TestCase):
         path = self._write(['not', 'an', 'object'])
         with self.assertRaises(SystemExit):
             load_hud_config(path)
+
+    def test_non_finite_numbers_are_fatal(self):
+        # json accepts Infinity/NaN by default; a layout cannot use them, so they
+        # must fail fast rather than silently falling back to a default size.
+        for literal in ('Infinity', '-Infinity', 'NaN'):
+            with self.subTest(literal=literal):
+                handle = tempfile.NamedTemporaryFile(
+                    mode='w', suffix='.json', delete=False)
+                handle.write('{"boom": {"width": %s}}' % literal)
+                handle.close()
+                self.addCleanup(os.unlink, handle.name)
+                with self.assertRaises(SystemExit):
+                    load_hud_config(handle.name)
+
+
+class OperatorHudVisibilityTest(unittest.TestCase):
+    """The key-2 flag gates only the boom and docking panels.
+
+    Each of those is additionally gated on its own ``visible`` config, so the
+    toggle is on while either is enabled. cutter_range is excluded because it is
+    gated on the cutter view, not this flag.
+    """
+
+    def _bridge(self, layout):
+        try:
+            from harvester_dashboard.bridge import DashboardBridge
+            from harvester_dashboard.config import DashboardConfig
+            from harvester_dashboard.model.telemetry_model import TelemetryModel
+            from harvester_dashboard.model.target_model import AnnotationState
+            from harvester_dashboard.protocol_shim import ensure_contract_importable
+        except Exception as exc:  # pragma: no cover - Qt not installed
+            raise unittest.SkipTest('dashboard bridge unavailable: %s' % exc)
+        ensure_contract_importable()
+        return DashboardBridge(
+            DashboardConfig(status_endpoint='', annotation_endpoint=''),
+            TelemetryModel(), AnnotationState(), hud_config=layout)
+
+    def test_cutter_only_does_not_enable_operator_huds(self):
+        # With only the cutter panel visible, the boom/docking toggle must start
+        # hidden: nothing it controls is on screen, so a "visible" default would
+        # make the first key-2 press hide rather than show.
+        try:
+            bridge = self._bridge(_layout_with(False, False, True))
+        except unittest.SkipTest:
+            self.skipTest('dashboard bridge unavailable')
+        self.assertFalse(bridge.operatorHudsVisible)
+
+    def test_either_boom_or_docking_enables_operator_huds(self):
+        for boom, docking in ((True, True), (True, False), (False, True)):
+            with self.subTest(boom=boom, docking=docking):
+                try:
+                    bridge = self._bridge(_layout_with(boom, docking, False))
+                except unittest.SkipTest:
+                    self.skipTest('dashboard bridge unavailable')
+                self.assertTrue(bridge.operatorHudsVisible)
+
+    def test_both_operator_panels_disabled_hides_operator_huds(self):
+        try:
+            bridge = self._bridge(_layout_with(False, False, True))
+        except unittest.SkipTest:
+            self.skipTest('dashboard bridge unavailable')
+        self.assertFalse(bridge.operatorHudsVisible)
 
 
 if __name__ == '__main__':

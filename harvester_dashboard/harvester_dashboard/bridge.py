@@ -79,14 +79,17 @@ if _QT_AVAILABLE:
                 if config.status_enabled else None)
             self._view = 'docking'
             self._hud_visible = True
-            # Operator HUDs are shown at startup (key 2 toggles them).  Each
-            # panel additionally gates on its own ``visible`` config, and the
-            # key-2 toggle stays on unless the admin disabled every panel.
-            self._operator_huds_visible = any((
-                self.hud_config.boom.visible,
-                self.hud_config.docking.visible,
-                self.hud_config.cutter_range.visible,
-            ))
+            # Operator HUDs are shown at startup (key 2 toggles them).  This flag
+            # gates the boom and docking panels only; each of those is
+            # additionally gated on its own ``visible`` config, so the toggle is
+            # on while either panel is enabled by config.  cutter_range is
+            # deliberately excluded: it is gated on the cutter view rather than
+            # this flag, so counting it would turn the toggle on (and light the
+            # "Boom/Dock" toolbar button) while showing neither panel.
+            self._operator_huds_visible = (
+                self.hud_config.boom.visible
+                or self.hud_config.docking.visible
+            )
             # The Cutter Range HUD is shown while the cutter camera is active;
             # key 1 toggles it when already on the cutter view.
             self._cutter_hud_visible = self.hud_config.cutter_range.visible

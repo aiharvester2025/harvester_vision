@@ -108,10 +108,14 @@ def pack_points(points: Sequence[Sequence[float]]) -> bytes:
     Built with one numpy conversion rather than a per-point Python list: at the
     MID-360's ~200k points/s the list-then-varargs form allocates a Python float
     object per coordinate, which is measurable on this CPU-constrained host.
+
+    Accepts any ``(N, 3)`` row sequence, including a NumPy array. The emptiness
+    check uses ``.size`` rather than truthiness because ``if not points`` raises
+    ``ValueError`` for an array with more than one row.
     """
-    if not points:
-        return b''
     array = np.asarray(points, dtype='<f4')
+    if array.size == 0:
+        return b''
     if array.ndim != 2 or array.shape[1] != 3:
         array = array.reshape(-1, 3)
     return array.astype('<f4', copy=False).tobytes()

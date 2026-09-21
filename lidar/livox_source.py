@@ -87,6 +87,13 @@ _SPECIAL_POINT_TAG_BIT = 0x10
 _RAW_POINT_SIZE_BYTES = 14
 _RAW_IMU_SIZE_BYTES = 24
 
+# The SDK copies each received datagram into a fixed 8192-byte buffer and hands
+# the callback a pointer to it (``kMaxBufferSize`` in the SDK's
+# device_manager.h). That buffer is the real upper bound on what we may read, so
+# the per-callback caps below are derived from it rather than chosen arbitrarily:
+# reading past it is a heap over-read. A corrupt ``dot_num`` or ``length`` field
+# alone must never be enough to exceed this.
+_SDK_CALLBACK_BUFFER_BYTES = 8192
 # ``LivoxLidarEthernetPacket`` header (see ``livox_lidar_def.h``, packed):
 # version(1) + length(2) + time_interval(2) + dot_num(2) + udp_cnt(2) +
 # frame_cnt(1) + data_type(1) + time_type(1) + rsvd(12) + crc32(4) +
@@ -101,10 +108,19 @@ _ETH_PACKET_HEADER_SIZE_BYTES = 36
 _ETH_PACKET_DOT_NUM_OFFSET = 5
 
 # Safety cap on payloads decoded from a single callback, so a corrupt or
-# hostile ``dot_num`` can never drive a huge allocation or a read past the
-# buffer the SDK handed us.
-_MAX_POINTS_PER_CALLBACK = 1200
-_MAX_IMU_PER_CALLBACK = 256
+# hostile ``dot_num``/``length`` can never drive a read past the buffer the SDK
+# handed us. Derived from the SDK's 8192-byte callback buffer so the cap cannot
+# exceed what the buffer can physically hold: the MID-360 sends 96-point packets
+# (1344 payload bytes), so 582 leaves ample headroom while making an over-read
+# impossible.
+_MAX_POINTS_PER_CALLBACK = (
+    (_SDK_CALLBACK_BUFFER_BYTES - _ETH_PACKET_HEADER_SIZE_BYTES)
+    // _RAW_POINT_SIZE_BYTES
+)
+_MAX_IMU_PER_CALLBACK = (
+    (_SDK_CALLBACK_BUFFER_BYTES - _ETH_PACKET_HEADER_SIZE_BYTES)
+    // _RAW_IMU_SIZE_BYTES
+)
 
 # Retry pacing for the poll fallback that starts the device without the
 # info-change callback. Backs off so repeated blocking SDK control round-trips
@@ -271,11 +287,17 @@ _IMU_CB = _PACKET_CB
 def _payload_view(packet_ptr, max_items, item_size_bytes):
     """Return the packet payload as a numpy byte view, or ``None`` if unusable.
 
-    Bounds the read three ways: the packet's own ``length`` field (the authoritative
-    payload byte count), ``dot_num``, and ``max_items``. ``length`` matters because
-    it is the only value that describes the buffer the SDK actually owns; trusting
-    ``dot_num`` alone lets a corrupt or spoofed packet drive ``string_at`` past the
-    end of that buffer. Returns ``None`` for an unusable packet.
+    Bounds the read four ways, so no single corrupt field can cause an over-read:
+
+      * the SDK's fixed 8192-byte callback buffer, which is the hard ceiling on
+        what may be read at all;
+      * the packet's own ``length`` field (whole packet size, including header);
+      * ``dot_num``, the count the packet claims;
+      * ``max_items``, the caller's cap.
+
+    ``length`` and ``dot_num`` are attacker/corruption-influenced, so the buffer
+    size is what actually guarantees safety. Returns ``None`` for a packet that
+    cannot be read sanely.
     """
     if not packet_ptr:
         return None
@@ -286,6 +308,9 @@ def _payload_view(packet_ptr, max_items, item_size_bytes):
     if declared < _ETH_PACKET_HEADER_SIZE_BYTES:
         return None
     available = declared - _ETH_PACKET_HEADER_SIZE_BYTES
+    # Never read beyond the SDK's callback buffer, whatever the packet claims.
+    available = min(available, _SDK_CALLBACK_BUFFER_BYTES
+                    - _ETH_PACKET_HEADER_SIZE_BYTES)
     count = int(header.dot_num)
     if count <= 0:
         return None

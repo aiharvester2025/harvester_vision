@@ -109,37 +109,43 @@ def discover(host_ip: str, current_ip: Optional[str], timeout: float,
     # still needs the SDK, so the config target is the address we expect.
     target = current_ip or BROADCAST_IP
     config_path = _write_discovery_config(host_ip, target)
-    bindings = _SdkBindings(library)
-
-    devices: list = []
-    seen = {}
-
-    def on_info_change(handle, info_ptr, client_data):
-        info = info_ptr.contents
-        lidar_ip = info.lidar_ip.split(b"\x00", 1)[0].decode("ascii", "replace")
-        serial = info.sn.split(b"\x00", 1)[0].decode("ascii", "replace")
-        seen[handle] = (lidar_ip, serial)
-        if handle not in devices:
-            devices.append(handle)
-
-    info_cb = _INFO_CB(on_info_change)
-    bindings.lib.SetLivoxLidarInfoChangeCallback.argtypes = [_INFO_CB, ctypes.c_void_p]
-    bindings.lib.SetLivoxLidarInfoChangeCallback.restype = None
-    bindings.lib.SetLivoxLidarInfoChangeCallback(info_cb, None)
-
-    if not bindings.init(config_path, host_ip):
-        os.unlink(config_path)
-        raise RuntimeError(
-            f"LivoxLidarSdkInit failed for host {host_ip}; is that IP assigned to "
-            "the NIC on the LiDAR link?"
-        )
     try:
+        # Loading the shared library can fail (LivoxSdkUnavailable); keeping the
+        # construction inside the try means the temp config is unlinked on that
+        # path too, not leaked.
+        bindings = _SdkBindings(library)
+
+        devices: list = []
+        seen = {}
+
+        def on_info_change(handle, info_ptr, client_data):
+            info = info_ptr.contents
+            lidar_ip = info.lidar_ip.split(b"\x00", 1)[0].decode("ascii", "replace")
+            serial = info.sn.split(b"\x00", 1)[0].decode("ascii", "replace")
+            seen[handle] = (lidar_ip, serial)
+            if handle not in devices:
+                devices.append(handle)
+
+        info_cb = _INFO_CB(on_info_change)
+        bindings.lib.SetLivoxLidarInfoChangeCallback.argtypes = [_INFO_CB, ctypes.c_void_p]
+        bindings.lib.SetLivoxLidarInfoChangeCallback.restype = None
+        bindings.lib.SetLivoxLidarInfoChangeCallback(info_cb, None)
+
+        if not bindings.init(config_path, host_ip):
+            raise RuntimeError(
+                f"LivoxLidarSdkInit failed for host {host_ip}; is that IP assigned "
+                "to the NIC on the LiDAR link?"
+            )
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline and not devices:
             time.sleep(0.1)
     finally:
-        # The config file is only needed for discovery; do not leave it behind.
-        os.unlink(config_path)
+        # The config file is only needed for discovery; do not leave it behind on
+        # any exit path, including a failed SDK load.
+        try:
+            os.unlink(config_path)
+        except OSError:
+            pass
     addresses = [seen[h][0] for h in devices]
     serials = [seen[h][1] for h in devices]
     return bindings, devices, list(zip(addresses, serials)), info_cb
