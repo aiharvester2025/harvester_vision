@@ -47,6 +47,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-points", type=int, default=2000, help="max points per message")
     parser.add_argument("--frame-id", dest="frame_id", default="mid360_link")
     parser.add_argument("--level-source", choices=("imu", "tilt", "boom", "none"), default="imu")
+    parser.add_argument("--sdk-config", dest="sdk_config",
+                        help="Livox-SDK2 JSON for livox-sdk mode (default: deployment sensor LAN)")
+    parser.add_argument("--host-ip", dest="host_ip", default=None,
+                        help="host IP on the LiDAR link (default: 192.168.50.10)")
+    parser.add_argument("--sdk-library", dest="sdk_library", default=None,
+                        help="Livox SDK shared library path")
     parser.add_argument("--disabled", action="store_true", help="start paused until enabled via control")
     args = parser.parse_args()
     if args.hz <= 0:
@@ -125,11 +131,20 @@ def main() -> None:
 
     if args.sdk_mode == "livox-sdk":
         try:
-            from lidar.livox_source import LivoxMid360Source
-            source = LivoxMid360Source(level_source=args.level_source)
+            from lidar.livox_source import DEFAULT_HOST_IP, LivoxMid360Source
         except ImportError as error:
             print(f"[{args.topic}] Livox SDK source not available: {error}")
             print(f"[{args.topic}] Install the SDK adapter or run with --sdk-mode synthetic")
+            return
+        try:
+            source = LivoxMid360Source(
+                level_source=args.level_source,
+                sdk_config_path=args.sdk_config,
+                host_ip=args.host_ip or DEFAULT_HOST_IP,
+                sdk_library_path=args.sdk_library,
+            )
+        except (ValueError, FileNotFoundError, RuntimeError) as error:
+            print(f"[{args.topic}] Livox SDK init failed: {error}")
             return
 
     while True:
