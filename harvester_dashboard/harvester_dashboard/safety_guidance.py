@@ -192,6 +192,10 @@ def state_message(state: str, g: Guidance) -> str:
     still the old one but the candidate has advanced, the message must match
     the shown colour rather than the candidate's (e.g. never show a "STOP NOW"
     message against an orange WARN banner).
+
+    The NO_DATA and SAFE messages are also produced by ``evaluate()`` through
+    this function (via ``_no_data_message``/``_safe_message``), so the two paths
+    cannot drift and break the colour/text invariant.
     """
     if state == DANGER:
         return 'STOP — collision risk'
@@ -203,9 +207,43 @@ def state_message(state: str, g: Guidance) -> str:
                     f'SLOW ({g.distance_m:.2f} m)')
         return 'SLOW'
     if state == NO_DATA:
+        return _no_data_message(g)
+    return _safe_message(g)
+
+
+def _no_data_message(g: Optional[Guidance] = None) -> str:
+    """The NO_DATA message (single definition).
+
+    ``evaluate()`` and ``state_message()`` both call this so a debounced hold can
+    never show NO_DATA text that disagrees with what ``evaluate()`` produced.  A
+    guidance with no usable distance (missing, zero, or non-finite) reports the
+    distance as unavailable; otherwise the range has simply not arrived yet.
+
+    Accepts either a ``Guidance`` or a raw distance, so both callers share it.
+    """
+    if isinstance(g, Guidance):
+        distance = g.distance_m
+    else:
+        distance = g
+    if distance is None:
         return 'approach: awaiting center range'
-    return (f'approach clear ({g.distance_m:.2f} m)'
-            if g.distance_m is not None else 'approach clear')
+    try:
+        usable = math.isfinite(float(distance)) and float(distance) > 0.0
+    except (TypeError, ValueError):
+        usable = False
+    return ('approach: awaiting center range' if usable
+            else 'approach: distance unavailable')
+
+
+def _safe_message(g: Optional[Guidance] = None) -> str:
+    """The SAFE message (single definition).
+
+    Accepts either a ``Guidance`` or a raw distance, so both ``evaluate()`` and
+    ``state_message()`` share one definition.
+    """
+    distance = g.distance_m if isinstance(g, Guidance) else g
+    return (f'approach clear ({distance:.2f} m)'
+            if distance is not None else 'approach clear')
 
 
 def _clamp_speed_for_ttc(speed_cm_s: float, min_speed_cm_s: float = 0.05) -> float:
@@ -255,7 +293,7 @@ def evaluate(
     """
     if speed_cm_s is None or distance_m is None or stale:
         return Guidance(NO_DATA, None, 0.0, distance_m, None, None, None,
-                        'approach: awaiting center range')
+                        _no_data_message(distance_m))
 
     speed = float(speed_cm_s)
     dist = float(distance_m)
@@ -263,10 +301,10 @@ def evaluate(
     # against every bound, so it would otherwise be reported as SAFE.
     if not (math.isfinite(speed) and math.isfinite(dist)):
         return Guidance(NO_DATA, None, speed, dist, None, None, None,
-                        'approach: distance unavailable')
+                        _no_data_message(dist))
     if dist <= 0.0:
         return Guidance(NO_DATA, None, speed, dist, None, None, None,
-                        'approach: distance unavailable')
+                        _no_data_message(dist))
 
     # Absolute standoff floor: inside the danger distance is DANGER regardless
     # of speed (even stationary).
@@ -326,7 +364,7 @@ def evaluate(
 
     # Otherwise: safe (moving away is always SAFE; stationary outside danger).
     return Guidance(SAFE, ttc_s, speed, dist, stop_dist, v_max, None,
-                    f'approach clear ({dist:.2f} m)')
+                    _safe_message(dist))
 
 
 def default_config_path() -> Path:

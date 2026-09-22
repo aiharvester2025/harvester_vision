@@ -84,7 +84,11 @@ The HUD is split into two independently-toggled layers:
   finiteness in `evaluate()`, not only at the ingest boundary. `SafetyConfig.load`
   falls back to defaults for a missing file (valid), but **logs a warning** for an
   existing file that is unreadable/malformed, so a broken tuning file is not
-  mistaken for an applied one. The `Docking Ranges` panel rows for the two
+  mistaken for an applied one. The `NO_DATA`/`SAFE` message text has a **single
+  definition** (`_no_data_message`/`_safe_message`), used by both `evaluate()`
+  and `state_message()`, so a debounced hold can never display text that
+  disagrees with the banner colour; keep them shared rather than re-inlining the
+  strings. The `Docking Ranges` panel rows for the two
   ultrasonic side sensors are labelled `Left`/`Right`
   (`c_channel_left`/`c_channel_right`).
 

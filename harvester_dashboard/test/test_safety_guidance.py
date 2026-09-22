@@ -312,6 +312,30 @@ class EvaluateStateTest(unittest.TestCase):
 
 
 class StateMessageTest(unittest.TestCase):
+    def test_evaluate_matches_state_message_for_no_data_and_safe(self):
+        # The NO_DATA and SAFE messages are produced by both evaluate() and
+        # state_message(); they must agree byte-for-byte, or a debounced hold
+        # would show text inconsistent with the banner colour.
+        cases = [
+            evaluate(None, None, SafetyConfig()),        # no reading
+            evaluate(10.0, 1.0, SafetyConfig(), stale=True),  # stale
+            evaluate(10.0, float('nan'), SafetyConfig()),     # non-finite
+            evaluate(5.0, 5.0, SafetyConfig()),          # safe
+            evaluate(-40.0, 3.0, SafetyConfig()),        # moving away
+        ]
+        for g in cases:
+            with self.subTest(state=g.state):
+                self.assertIn(g.state, (NO_DATA, SAFE))
+                self.assertEqual(g.message, state_message(g.state, g))
+
+    def test_no_data_message_has_no_distance_text(self):
+        # A NO_DATA message must not claim a distance; a stale/failed reading
+        # cannot report "approach clear (1.00 m)".
+        for g in (evaluate(None, None, SafetyConfig()),
+                  evaluate(10.0, 1.0, SafetyConfig(), stale=True)):
+            self.assertNotIn('approach clear', g.message)
+            self.assertIn('awaiting', g.message)
+
     def test_state_message_matches_held_state(self):
         # During debounce the displayed message must match the shown colour,
         # never the candidate's (no "STOP" text on an orange banner).
