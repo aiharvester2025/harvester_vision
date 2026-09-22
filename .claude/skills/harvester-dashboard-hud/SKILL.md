@@ -73,13 +73,20 @@ The HUD is split into two independently-toggled layers:
   only and render-only.
 
   Two invariants worth protecting: (1) the HUD must **never** show `safe` when
-  the range is absent, stale, or has no fittable closing speed — a stalled
-  stream must not invent a 0 cm/s speed and flip DANGER to a reassuring green
-  (`evaluate` takes `speed_cm_s=None` → `no_data`, and the bridge holds a
+  the range is absent, stale, non-finite, or has no fittable closing speed — a
+  stalled stream must not invent a 0 cm/s speed and flip DANGER to a reassuring
+  green (`evaluate` takes `speed_cm_s=None` → `no_data`, and the bridge holds a
   WARN/DANGER while the gap is fresh but unfittable); (2) the displayed message
   must never contradict the shown state (a WARN banner always leads with
-  `SLOW`). The `Docking Ranges` panel rows for the two ultrasonic side sensors
-  are labelled `Left`/`Right` (`c_channel_left`/`c_channel_right`).
+  `SLOW`). **A non-finite (`NaN`/`Inf`) gap or speed is `no_data` at the model
+  level** — `NaN` compares false against every threshold, so an unguarded `NaN`
+  would fall through all DANGER/WARN tests and render a false-green `SAFE`; guard
+  finiteness in `evaluate()`, not only at the ingest boundary. `SafetyConfig.load`
+  falls back to defaults for a missing file (valid), but **logs a warning** for an
+  existing file that is unreadable/malformed, so a broken tuning file is not
+  mistaken for an applied one. The `Docking Ranges` panel rows for the two
+  ultrasonic side sensors are labelled `Left`/`Right`
+  (`c_channel_left`/`c_channel_right`).
 
 - **Developer-diagnostic HUD** (`7` `7` `7` + `Enter` → `bridge.diagnosticVisible`): bottom
   stream table, toolbar status line, active-camera timestamp line, stale-camera ring.

@@ -192,17 +192,24 @@ safe speed). `NO DATA` is grey and distinct from a green `SAFE`; `danger` and
 to prevent flicker.
 
 Two safety invariants hold regardless of tuning: the panel **never shows `SAFE`
-on absent, stale, or unfittable data** (a stalled range stream cannot invent a
-0 cm/s speed and clear a DANGER approach; while the gap is fresh but no closing
-speed can be fitted, a held WARN/DANGER is retained, and staleness falls through
-to `NO DATA`), and the banner text never contradicts its colour (a WARN banner
-always leads with `SLOW`). Thresholds are clamped on load, including the
-`danger` bands (pulled inside the corresponding `warn` bands) and a strictly
-positive `warn_margin`.
+on absent, stale, unfittable, or non-finite data** (a stalled range stream cannot
+invent a 0 cm/s speed and clear a DANGER approach; while the gap is fresh but no
+closing speed can be fitted, a held WARN/DANGER is retained, and staleness falls
+through to `NO DATA`), and the banner text never contradicts its colour (a WARN
+banner always leads with `SLOW`). A **non-finite** gap or speed (`NaN`/`Inf`) is
+treated as `NO DATA` at the model level, not just at the ingest boundary: `NaN`
+compares false against every threshold, so an unguarded `NaN` gap would otherwise
+fall through every DANGER/WARN test and render a false-green `SAFE`. Thresholds
+are clamped on load, including the `danger` bands (pulled inside the
+corresponding `warn` bands) and a strictly positive `warn_margin`.
 
 The thresholds live in `harvester_dashboard/config/safety_guidance.json`, loaded
-with `--safety-config` (default: the shipped file; a missing/malformed file
-falls back to the built-in defaults, and out-of-range values are clamped):
+with `--safety-config` (default: the shipped file). A missing file falls back to
+the built-in defaults silently (a missing tuning file is a valid configuration),
+but an **existing** file that is unreadable, malformed, or not a JSON object also
+falls back to the defaults **and logs a warning**, so a broken tuning file on the
+operator display is not mistaken for an applied one; out-of-range values are
+clamped:
 
 ```bash
 PYTHONPATH=harvester_dashboard /usr/bin/python3 -m harvester_dashboard.main \

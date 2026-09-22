@@ -58,10 +58,13 @@ dashboard.
 from __future__ import annotations
 
 import json
+import logging
 import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+
+log = logging.getLogger(__name__)
 
 SAFE = 'safe'
 WARN = 'warn'
@@ -96,17 +99,36 @@ class SafetyConfig:
     def load(cls, path: Optional[Path] = None) -> 'SafetyConfig':
         """Load thresholds from a JSON file, falling back to defaults.
 
-        Missing keys keep their dataclass defaults; malformed/absent files
-        return the default configuration rather than raising (the HUD must
-        never crash over a tuning file).
+        Missing keys keep their dataclass defaults; an **absent** file returns
+        the default configuration silently (a missing tuning file is a valid
+        configuration).  An existing-but-unreadable/malformed file also returns
+        the defaults, but logs a warning: the HUD must never crash over a tuning
+        file, yet a silently-ignored broken file on the operator display would
+        make the shown guidance look tuned when it is not.
         """
         if path is None:
             return cls()
         try:
-            raw = json.loads(Path(path).read_text(encoding='utf-8'))
-        except (OSError, json.JSONDecodeError):
+            text = Path(path).read_text(encoding='utf-8')
+        except OSError as error:
+            # A genuinely absent file is not an error; anything else (permission,
+            # I/O) means an intended tuning file was not applied.
+            if Path(path).exists():
+                log.warning(
+                    'safety tuning file %r could not be read (%s); using '
+                    'built-in defaults', path, error)
+            return cls()
+        try:
+            raw = json.loads(text)
+        except json.JSONDecodeError as error:
+            log.warning(
+                'safety tuning file %r is malformed (%s); using built-in '
+                'defaults', path, error)
             return cls()
         if not isinstance(raw, dict):
+            log.warning(
+                'safety tuning file %r must be a JSON object; using built-in '
+                'defaults', path)
             return cls()
         values = {k: raw[k] for k in (
             'a_max_m_s2', 'latency_s', 'warn_margin',
@@ -222,6 +244,12 @@ def evaluate(
     ``speed_cm_s`` / ``distance_m`` may be None (no valid sensor reading);
     ``stale`` marks data older than ``cfg.stale_s``.  Either yields NO_DATA.
 
+    A **non-finite** (NaN/Inf) reading is also NO_DATA: JSON accepts the bare
+    ``NaN``/``Infinity`` literals, and every comparison against NaN is false, so
+    an unguarded NaN gap would fall through every DANGER/WARN test and be
+    reported as SAFE.  A reassuring green banner on unreadable range data is the
+    one failure this model must never produce.
+
     Hysteresis is intentionally NOT applied here (this is a stateless
     evaluation); the bridge holds the debounce across frames.
     """
@@ -231,6 +259,11 @@ def evaluate(
 
     speed = float(speed_cm_s)
     dist = float(distance_m)
+    # Reject non-finite readings before any comparison: NaN compares false
+    # against every bound, so it would otherwise be reported as SAFE.
+    if not (math.isfinite(speed) and math.isfinite(dist)):
+        return Guidance(NO_DATA, None, speed, dist, None, None, None,
+                        'approach: distance unavailable')
     if dist <= 0.0:
         return Guidance(NO_DATA, None, speed, dist, None, None, None,
                         'approach: distance unavailable')

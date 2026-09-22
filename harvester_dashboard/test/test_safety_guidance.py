@@ -35,7 +35,54 @@ class SafetyConfigTest(unittest.TestCase):
         handle.write('{not json')
         handle.close()
         self.addCleanup(os.unlink, handle.name)
-        self.assertEqual(SafetyConfig.load(handle.name), SafetyConfig())
+        with self.assertLogs('harvester_dashboard.safety_guidance',
+                             level='WARNING'):
+            cfg = SafetyConfig.load(handle.name)
+        self.assertEqual(cfg, SafetyConfig())
+
+    def test_missing_file_logs_no_warning(self):
+        # An absent tuning file is a valid configuration (defaults); it must not
+        # spam a warning on every startup.  (assertNoLogs is 3.10+; this repo
+        # runs 3.8, so capture with a handler.)
+        import logging
+        records = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        logger = logging.getLogger('harvester_dashboard.safety_guidance')
+        handler = _Capture()
+        logger.addHandler(handler)
+        try:
+            cfg = SafetyConfig.load('/nonexistent/safety.json')
+        finally:
+            logger.removeHandler(handler)
+        self.assertEqual(cfg, SafetyConfig())
+        self.assertEqual([r for r in records if r.levelno >= logging.WARNING],
+                         [])
+
+    def test_malformed_file_logs_warning(self):
+        handle = tempfile.NamedTemporaryFile(
+            mode='w', suffix='.json', delete=False)
+        handle.write('{not json')
+        handle.close()
+        self.addCleanup(os.unlink, handle.name)
+        with self.assertLogs('harvester_dashboard.safety_guidance',
+                             level='WARNING') as captured:
+            SafetyConfig.load(handle.name)
+        self.assertIn('malformed', captured.output[0])
+
+    def test_non_object_file_logs_warning(self):
+        handle = tempfile.NamedTemporaryFile(
+            mode='w', suffix='.json', delete=False)
+        json.dump([1, 2, 3], handle)
+        handle.close()
+        self.addCleanup(os.unlink, handle.name)
+        with self.assertLogs('harvester_dashboard.safety_guidance',
+                             level='WARNING') as captured:
+            SafetyConfig.load(handle.name)
+        self.assertIn('JSON object', captured.output[0])
 
     def test_non_object_json_returns_defaults(self):
         handle = tempfile.NamedTemporaryFile(
@@ -161,6 +208,34 @@ class EvaluateStateTest(unittest.TestCase):
     def test_zero_or_negative_distance_is_no_data(self):
         self.assertEqual(evaluate(10.0, 0.0, self.cfg).state, NO_DATA)
         self.assertEqual(evaluate(10.0, -1.0, self.cfg).state, NO_DATA)
+
+    def test_non_finite_distance_is_no_data_never_safe(self):
+        # NaN compares false against every bound, so an unguarded NaN gap would
+        # fall through every DANGER/WARN test and be reported as a false-green
+        # SAFE.  A non-finite reading must be NO_DATA.
+        for distance in (float('nan'), float('inf'), -float('inf')):
+            with self.subTest(distance=distance):
+                g = evaluate(0.0, distance, self.cfg)
+                self.assertEqual(g.state, NO_DATA)
+                self.assertNotEqual(g.state, SAFE)
+
+    def test_non_finite_speed_is_no_data(self):
+        for speed in (float('nan'), float('inf'), -float('inf')):
+            with self.subTest(speed=speed):
+                self.assertEqual(evaluate(speed, 1.0, self.cfg).state, NO_DATA)
+
+    def test_non_finite_never_reports_safe(self):
+        # Exhaustive: no combination of non-finite inputs may be SAFE.
+        values = [float('nan'), float('inf'), -float('inf'), 0.0, 1.0, None]
+        for speed in values:
+            for distance in values:
+                state = evaluate(speed, distance, self.cfg).state
+                if (speed is not None and distance is not None
+                        and not math.isfinite(speed)
+                        or (distance is not None and not math.isfinite(distance))):
+                    self.assertNotEqual(state, SAFE,
+                                        'speed={} distance={}'.format(
+                                            speed, distance))
 
     def test_no_data_never_reports_safe(self):
         # A false green on absent telemetry is the most dangerous failure.
