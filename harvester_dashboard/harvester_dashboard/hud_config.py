@@ -19,6 +19,7 @@ BOOM = 'boom'
 DOCKING = 'docking'
 CUTTER_RANGE = 'cutter_range'
 DOCK_GUIDANCE = 'dock_guidance'
+CUTTER_GUIDANCE = 'cutter_guidance'
 
 # Anchors accepted for a panel.  ``value`` is the position name used in JSON
 # (``<vertical>-<horizontal>``); ``horizontal``/``vertical`` below drive QML.
@@ -66,6 +67,17 @@ _DEFAULT_DOCK_GUIDANCE_ROWS = {
     'max_speed': 'Max Safe',
 }
 
+# Default display names for the cutter safety-guide metrics rows (see
+# cutter_safety_guidance.py / the CutterGuidanceHud panel).
+_DEFAULT_CUTTER_GUIDANCE_ROWS = {
+    'state': 'State',
+    'phase': 'Cut Step',
+    'clearance': 'Clearance',
+    'speed': 'Closing Speed',
+    'ttc': 'TTC',
+    'max_speed': 'Max Safe',
+}
+
 
 @dataclass
 class HudPanelConfig:
@@ -82,12 +94,14 @@ class HudPanelConfig:
     margin_px: int = 12
     opacity: float = 0.85
     rows: Dict[str, str] = field(default_factory=dict)
-    # Dock-guidance-only extras (ignored by the generic SensorHudPanel, used by
-    # DockGuidanceHud.qml).  Kept on the shared dataclass so the guidance panel
-    # is configured in the same file/loader as every other sensor HUD.
-    stopbar_range_m: float = 1.5      # full-scale gap of the stop-bar (m)
+    # Dock/cutter-guidance-only extras (ignored by the generic SensorHudPanel,
+    # used by DockGuidanceHud.qml / CutterGuidanceHud.qml).  Kept on the shared
+    # dataclass so both guidance panels are configured in the same file/loader
+    # as every other sensor HUD.
+    stopbar_range_m: float = 1.5      # full-scale of the clearance/stop bar (m)
     banner_font_px: int = 40          # state-banner text size
     pulse_danger: bool = True         # pulse the banner while DANGER
+    show_confirm_button: bool = True  # cutter: show the CONFIRM STEP button
 
     def to_qml(self) -> Dict[str, Any]:
         """Return a plain dict suitable for a QVariantMap bridge property."""
@@ -106,6 +120,7 @@ class HudPanelConfig:
             'stopbarRangeM': float(self.stopbar_range_m),
             'bannerFontPx': int(self.banner_font_px),
             'pulseDanger': bool(self.pulse_danger),
+            'showConfirmButton': bool(self.show_confirm_button),
         }
 
 
@@ -117,6 +132,7 @@ class HudLayoutConfig:
     docking: HudPanelConfig
     cutter_range: HudPanelConfig
     dock_guidance: HudPanelConfig
+    cutter_guidance: HudPanelConfig
 
     def to_qml(self) -> Dict[str, Any]:
         return {
@@ -124,6 +140,7 @@ class HudLayoutConfig:
             DOCKING: self.docking.to_qml(),
             CUTTER_RANGE: self.cutter_range.to_qml(),
             DOCK_GUIDANCE: self.dock_guidance.to_qml(),
+            CUTTER_GUIDANCE: self.cutter_guidance.to_qml(),
         }
 
 
@@ -187,8 +204,28 @@ def default_hud_layout() -> HudLayoutConfig:
             banner_font_px=40,
             pulse_danger=True,
         ),
+        cutter_guidance=HudPanelConfig(
+            name=CUTTER_GUIDANCE,
+            visible=True,
+            # Bottom-center on the cutter view.  The Cutter Range distance
+            # panel is bottom-left on the same view; the host positions this
+            # panel in the free gap so the two never overlap.
+            anchor='bottom-center',
+            caption='CUTTER SAFETY',
+            width=620,
+            height=0,
+            value_font_px=46,
+            caption_font_px=30,
+            margin_px=12,
+            opacity=0.85,
+            rows=dict(_DEFAULT_CUTTER_GUIDANCE_ROWS),
+            # Cutter clearances are small, so the bar's full-scale is 1 m.
+            stopbar_range_m=1.0,
+            banner_font_px=40,
+            pulse_danger=True,
+            show_confirm_button=True,
+        ),
     )
-
 
 def _as_int(value: Any, fallback: int) -> int:
     # OverflowError is caught because json accepts the Infinity/NaN literals by
@@ -258,6 +295,8 @@ def _merge_panel(base: HudPanelConfig, raw: Any, name: str) -> HudPanelConfig:
         banner_font_px=max(1, _as_int(
             raw.get('banner_font_px'), base.banner_font_px)),
         pulse_danger=_as_bool(raw.get('pulse_danger'), base.pulse_danger),
+        show_confirm_button=_as_bool(
+            raw.get('show_confirm_button'), base.show_confirm_button),
     )
 
 
@@ -314,11 +353,13 @@ def load_hud_config(path: Optional[str]) -> HudLayoutConfig:
             layout.cutter_range, data.get(CUTTER_RANGE), CUTTER_RANGE),
         dock_guidance=_merge_panel(
             layout.dock_guidance, data.get(DOCK_GUIDANCE), DOCK_GUIDANCE),
+        cutter_guidance=_merge_panel(
+            layout.cutter_guidance, data.get(CUTTER_GUIDANCE), CUTTER_GUIDANCE),
     )
 
 
 __all__ = [
-    'BOOM', 'DOCKING', 'CUTTER_RANGE', 'DOCK_GUIDANCE',
+    'BOOM', 'DOCKING', 'CUTTER_RANGE', 'DOCK_GUIDANCE', 'CUTTER_GUIDANCE',
     'HudPanelConfig', 'HudLayoutConfig',
     'default_hud_layout', 'load_hud_config', 'default_hud_config_path',
 ]

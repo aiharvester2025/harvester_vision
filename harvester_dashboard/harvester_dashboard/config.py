@@ -32,6 +32,9 @@ class DashboardConfig:
     # default) falls back to the module's best-effort path, then to the built-in
     # thresholds; a missing/malformed file never raises.
     safety_config_path: Optional[str] = None
+    # Optional path to the cutter safety-guidance tuning file (mirrors
+    # ``safety_config_path``; None falls back to the module path, then defaults).
+    cutter_config_path: Optional[str] = None
 
     @property
     def status_enabled(self) -> bool:
@@ -68,6 +71,8 @@ class DashboardConfig:
                             help='path to a JSON file overriding HUD panel layout/captions/sizes')
         parser.add_argument('--safety-config', default=None,
                             help='path to the docking safety-guidance tuning JSON file')
+        parser.add_argument('--cutter-config', default=None,
+                            help='path to the cutter safety-guidance tuning JSON file')
         known, _unknown = parser.parse_known_args(args)
         return cls(
             pub_endpoint=known.pub,
@@ -82,4 +87,5 @@ class DashboardConfig:
             pointcloud_max_points=max(1, known.pointcloud_max_points),
             hud_config_path=(known.hud_config or None),
             safety_config_path=(known.safety_config or None),
+            cutter_config_path=(known.cutter_config or None),
         )

@@ -28,6 +28,22 @@ from harvester_dashboard.protocol_shim import ensure_contract_importable
 ensure_contract_importable()
 
 
+def _abs_center_x(item, root):
+    """Absolute (root-space) x of an item's horizontal center.
+
+    ``item.x``/``width`` are in the item's parent coordinate space (the camera
+    view inset), so map to the root to compare against the screen center.
+    """
+    from PySide2.QtCore import QPointF
+    return item.mapToItem(root, QPointF(item.property('width') / 2.0, 0)).x()
+
+
+def _abs_left_x(item, root):
+    """Absolute (root-space) left edge x of an item."""
+    from PySide2.QtCore import QPointF
+    return item.mapToItem(root, QPointF(0, 0)).x()
+
+
 @unittest.skipUnless(_GUI_IMPORTS_OK, 'PySide2 QtQuick not installed')
 class GuiSmokeTest(unittest.TestCase):
     @classmethod
@@ -138,10 +154,11 @@ class GuiSmokeTest(unittest.TestCase):
     def test_operator_hud_layout_and_rows(self):
         layout = self.bridge.hudLayout
         self.assertEqual(set(layout), {'boom', 'docking', 'cutter_range',
-                                       'dock_guidance'})
+                                       'dock_guidance', 'cutter_guidance'})
         self.assertEqual(layout['boom']['anchor'], 'bottom-right')
         self.assertEqual(layout['docking']['anchor'], 'bottom-left')
         self.assertEqual(layout['dock_guidance']['anchor'], 'bottom-center')
+        self.assertEqual(layout['cutter_guidance']['anchor'], 'bottom-center')
         # Boom has the seven PLC MQTT sensor rows.
         keys = [row['key'] for row in self.bridge.boomRows]
         self.assertEqual(keys, [
@@ -272,6 +289,7 @@ class HudPanelGatingTest(unittest.TestCase):
             docking=HudPanelConfig(name='docking', visible=True, anchor='bottom-left'),
             cutter_range=HudPanelConfig(name='cutter_range', visible=True),
             dock_guidance=HudPanelConfig(name='dock_guidance', visible=True),
+            cutter_guidance=HudPanelConfig(name='cutter_guidance', visible=True),
         )
         cls.bridge = DashboardBridge(
             DashboardConfig(status_endpoint='', annotation_endpoint=''),
@@ -301,19 +319,22 @@ class HudPanelGatingTest(unittest.TestCase):
         for _ in range(4):
             self.app.processEvents()
         active = [l.property('active') for l in self._loaders()]
+        # Loader order: docking, boom, cutter, cutter_guidance, dock_guidance.
         # docking active, boom inactive, cutter inactive (docking view),
+        # cutter_guidance inactive (docking view),
         # dock_guidance active (docking view + operator HUDs on).
-        self.assertEqual(active, [True, False, False, True])
+        self.assertEqual(active, [True, False, False, False, True])
 
     def test_docking_panel_hidden_on_cutter_view(self):
         # On the cutter view the docking panel hides so it cannot overlap
-        # the cutter-range panel (both default to bottom-left); the guidance
-        # panel is docking-view only too.
+        # the cutter-range panel (both default to bottom-left); the docking
+        # guidance panel is docking-view only too.  The cutter guidance panel
+        # is cutter-view only.
         self.bridge.set_view('cutter')
         for _ in range(4):
             self.app.processEvents()
         active = [l.property('active') for l in self._loaders()]
-        self.assertEqual(active, [False, False, True, False])
+        self.assertEqual(active, [False, False, True, True, False])
 
     def test_key2_toggle_drives_docking_loader(self):
         # Key 2 must actually drive the QML gating (docking loader active
@@ -420,14 +441,14 @@ class DockGuidanceGuiTest(unittest.TestCase):
 
         self.bridge.set_view('docking')
         self._process()
-        # Loader order: docking, boom, cutter, dock_guidance.
-        self.assertTrue(loaders()[3].property('active'))
+        # Loader order: docking, boom, cutter, cutter_guidance, dock_guidance.
+        self.assertTrue(loaders()[4].property('active'))
         self.bridge.set_view('cutter')
         self._process()
-        self.assertFalse(loaders()[3].property('active'))
+        self.assertFalse(loaders()[4].property('active'))
         self.bridge.set_view('docking')
         self._process()
-        self.assertTrue(loaders()[3].property('active'))
+        self.assertTrue(loaders()[4].property('active'))
 
     def test_bottom_row_panels_do_not_overlap(self):
         # The three bottom panels (docking ranges | dock guidance | boom) must
@@ -443,7 +464,7 @@ class DockGuidanceGuiTest(unittest.TestCase):
         # width wide enough to leave a gap between the docking and boom panels.
         self.root.setProperty('width', 1920)
         self._process()
-        docking, boom, _cutter, guidance = loaders()
+        docking, boom, _cutter, _cutter_guidance, guidance = loaders()
         for loader in (docking, boom, guidance):
             self.assertTrue(loader.property('active'))
         self.assertTrue(guidance.property('visible'))
@@ -471,10 +492,287 @@ class DockGuidanceGuiTest(unittest.TestCase):
         self.bridge.set_view('docking')
         self.root.setProperty('width', 1024)
         self._process()
-        _docking, _boom, _cutter, guidance = loaders()
+        _docking, _boom, _cutter, _cutter_guidance, guidance = loaders()
         self.assertFalse(guidance.property('visible'))
         self.root.setProperty('width', 1920)
         self._process()
+
+
+@unittest.skipUnless(_GUI_IMPORTS_OK, 'PySide2 QtQuick not installed')
+class CutterGuidanceGuiTest(unittest.TestCase):
+    """The cutter safety-guide HUD is cutter-view only and never overlaps the
+    Cutter Range (distance sensor) panel below it."""
+
+    @classmethod
+    def setUpClass(cls):
+        from harvester_dashboard.bridge import DashboardBridge
+        from harvester_dashboard.image_provider import FrameImageProvider
+
+        cls.app = QGuiApplication.instance() or QGuiApplication(
+            ['harvester-dashboard-cutter-guidance'])
+        cls.model = TelemetryModel()
+        cls.bridge = DashboardBridge(
+            DashboardConfig(status_endpoint='', annotation_endpoint=''),
+            cls.model, AnnotationState())
+        cls.view = QQuickView()
+        cls.view.engine().addImageProvider('frames', FrameImageProvider())
+        cls.view.rootContext().setContextProperty('bridge', cls.bridge)
+        qml_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'qml')
+        cls.view.setSource(QUrl.fromLocalFile(os.path.join(qml_dir, 'Dashboard.qml')))
+        cls.root = cls.view.rootObject()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.view.deleteLater()
+        cls.app.processEvents()
+        del cls.view
+
+    def _process(self):
+        for _ in range(4):
+            self.app.processEvents()
+
+    def _loaders(self):
+        from PySide2.QtCore import QObject
+        return [c for c in self.root.findChildren(QObject)
+                if c.metaObject().className() == 'QQuickLoader']
+
+    def test_boots_no_data_never_safe(self):
+        self.assertEqual(self.bridge.cutterSafetyState, 'no_data')
+        self.assertEqual(self.bridge.cutterPhase, 'idle')
+        self.assertIn('awaiting', self.bridge.cutterGuidanceText)
+
+    def test_float_properties_are_nan_without_data(self):
+        import math
+        for value in (self.bridge.cutterClearanceM,
+                      self.bridge.cutterRawRangeM,
+                      self.bridge.cutterSpeedSmoothedCmS,
+                      self.bridge.cutterMaxSpeedCmS,
+                      self.bridge.cutterStopDistanceM,
+                      self.bridge.cutterTtcS):
+            self.assertTrue(math.isnan(value), value)
+
+    def test_cutter_rows_present_and_shaped(self):
+        rows = self.bridge.cutterSafetyRow
+        keys = [row['key'] for row in rows]
+        self.assertEqual(keys, ['state', 'phase', 'clearance', 'speed',
+                                'ttc', 'max_speed'])
+        by_key = {r['key']: r for r in rows}
+        self.assertEqual(by_key['state']['value'], 'NO DATA')
+        self.assertFalse(by_key['state']['valid'])
+
+    def test_cutter_guidance_panel_is_cutter_view_only(self):
+        # Loader order: docking, boom, cutter, cutter_guidance, dock_guidance.
+        self.bridge.set_view('cutter')
+        self._process()
+        self.assertTrue(self._loaders()[3].property('active'))
+        self.bridge.set_view('docking')
+        self._process()
+        self.assertFalse(self._loaders()[3].property('active'))
+
+    def test_key1_toggle_hides_cutter_guidance_with_range_hud(self):
+        # Key 1 on the cutter view toggles the Cutter Range HUD; the Cutter
+        # Safety-Guide HUD must react together, or the toggle would leave a
+        # guidance panel behind on an otherwise-empty cutter view.
+        self.bridge.set_view('cutter')
+        self.bridge._set_cutter_hud_visible(True)
+        self._process()
+        self.assertTrue(self._loaders()[2].property('active'))
+        self.assertTrue(self._loaders()[3].property('active'))
+        self.bridge.select_cutter_view()   # key 1 -> hide both
+        self._process()
+        self.assertFalse(self._loaders()[2].property('active'))
+        self.assertFalse(self._loaders()[3].property('active'))
+        self.bridge.select_cutter_view()   # key 1 again -> show both
+        self._process()
+        self.assertTrue(self._loaders()[2].property('active'))
+        self.assertTrue(self._loaders()[3].property('active'))
+        # Restore for other tests.
+        self.bridge.set_view('docking')
+        self.bridge._set_cutter_hud_visible(True)
+        self._process()
+
+    def test_cutter_row_panels_do_not_overlap(self):
+        # On the cutter view the Cutter Range panel (bottom-left) and the
+        # Cutter Safety-Guide panel (bottom-center) must sit side by side.
+        self.bridge.set_view('cutter')
+        self.root.setProperty('width', 1920)
+        self._process()
+        _docking, _boom, cutter_range, cutter_guidance, _dock = self._loaders()
+        self.assertTrue(cutter_range.property('active'))
+        self.assertTrue(cutter_guidance.property('active'))
+        self.assertTrue(cutter_guidance.property('visible'))
+        range_right = _abs_left_x(cutter_range, self.root) \
+            + cutter_range.property('width')
+        guidance_left = _abs_left_x(cutter_guidance, self.root)
+        self.assertLessEqual(range_right, guidance_left,
+                             'cutter range overlaps cutter guidance')
+        self.assertGreater(cutter_guidance.property('width'), 0)
+        # Restore the view for other tests.
+        self.bridge.set_view('docking')
+        self._process()
+
+    def test_cutter_guidance_is_screen_centered(self):
+        # The guidance panel must be centered on the SCREEN, not merely in the
+        # leftover gap right of the Cutter Range panel (which sits bottom-left
+        # and would push a gap-centered panel visibly right of center).
+        self.bridge.set_view('cutter')
+        for width in (1920, 1600, 1440, 1280):
+            with self.subTest(width=width):
+                self.root.setProperty('width', width)
+                self._process()
+                _d, _b, _cr, guidance, _dock = self._loaders()
+                self.assertTrue(guidance.property('visible'))
+                center = _abs_center_x(guidance, self.root)
+                self.assertAlmostEqual(
+                    center, width / 2.0, delta=2.0,
+                    msg='cutter guidance is not screen-centered at %d' % width)
+        self.root.setProperty('width', 1920)
+        self._process()
+
+    def test_cutter_row_hides_guidance_when_too_narrow(self):
+        self.bridge.set_view('cutter')
+        # Narrower than the cutter-range panel (460) + margins + a usable
+        # guidance panel, so the guidance panel hides rather than overlapping.
+        self.root.setProperty('width', 760)
+        self._process()
+        _docking, _boom, _cutter_range, cutter_guidance, _dock = self._loaders()
+        self.assertTrue(cutter_guidance.property('active'))
+        self.assertFalse(cutter_guidance.property('visible'))
+        self.root.setProperty('width', 1920)
+        self._process()
+
+
+@unittest.skipUnless(_GUI_IMPORTS_OK, 'PySide2 QtQuick not installed')
+class CutterGuidanceRightAnchorGuiTest(unittest.TestCase):
+    """A right-anchored Cutter Range panel must never be overlapped by the
+    Cutter Safety-Guide panel (its reserved band follows the range panel)."""
+
+    @classmethod
+    def setUpClass(cls):
+        import json
+        import tempfile
+
+        from harvester_dashboard.bridge import DashboardBridge
+        from harvester_dashboard.hud_config import load_hud_config
+        from harvester_dashboard.image_provider import FrameImageProvider
+
+        cls.app = QGuiApplication.instance() or QGuiApplication(
+            ['harvester-dashboard-cutter-right-anchor'])
+        # hudLayout is a constant QML property, so the layout must be set at
+        # construction time (as a real --hud-config deployment does).
+        handle = tempfile.NamedTemporaryFile(
+            mode='w', suffix='.json', delete=False)
+        json.dump({'cutter_range': {'anchor': 'bottom-right'}}, handle)
+        handle.close()
+        cls._config_path = handle.name
+        cls.model = TelemetryModel()
+        cls.bridge = DashboardBridge(
+            DashboardConfig(status_endpoint='', annotation_endpoint=''),
+            cls.model, AnnotationState(),
+            hud_config=load_hud_config(cls._config_path))
+        cls.view = QQuickView()
+        cls.view.engine().addImageProvider('frames', FrameImageProvider())
+        cls.view.rootContext().setContextProperty('bridge', cls.bridge)
+        qml_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'qml')
+        cls.view.setSource(
+            QUrl.fromLocalFile(os.path.join(qml_dir, 'Dashboard.qml')))
+        cls.root = cls.view.rootObject()
+        cls.root.setProperty('width', 1920)
+        cls.root.setProperty('height', 1080)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.view.deleteLater()
+        cls.app.processEvents()
+        del cls.view
+        os.unlink(cls._config_path)
+
+    def test_right_anchored_range_not_overlapped(self):
+        self.bridge.set_view('cutter')
+        for _ in range(10):
+            self.app.processEvents()
+        from PySide2.QtCore import QObject
+        loaders = [c for c in self.root.findChildren(QObject)
+                   if c.metaObject().className() == 'QQuickLoader']
+        cutter_range, cutter_guidance = loaders[2], loaders[3]
+        self.assertTrue(cutter_range.property('active'))
+        # The range panel really is on the right.
+        range_left = _abs_left_x(cutter_range, self.root)
+        self.assertGreater(range_left, 1920 / 2.0)
+        if not cutter_guidance.property('visible'):
+            # Hiding is the safe outcome; there is no overlap.
+            return
+        guide_right = _abs_left_x(cutter_guidance, self.root) \
+            + cutter_guidance.property('width')
+        self.assertLessEqual(
+            guide_right, range_left,
+            'cutter guidance overlaps a right-anchored range panel')
+
+
+@unittest.skipUnless(_GUI_IMPORTS_OK, 'PySide2 QtQuick not installed')
+class CutterGuidanceCenterRangeGuiTest(unittest.TestCase):
+    """A centered Cutter Range panel must not be overlapped by the guidance
+    panel; a side-anchored guidance panel sits in the free edge band."""
+
+    @classmethod
+    def setUpClass(cls):
+        import json
+        import tempfile
+
+        from harvester_dashboard.bridge import DashboardBridge
+        from harvester_dashboard.hud_config import load_hud_config
+        from harvester_dashboard.image_provider import FrameImageProvider
+
+        cls.app = QGuiApplication.instance() or QGuiApplication(
+            ['harvester-dashboard-cutter-center-range'])
+        handle = tempfile.NamedTemporaryFile(
+            mode='w', suffix='.json', delete=False)
+        json.dump({'cutter_range': {'anchor': 'bottom-center'},
+                   'cutter_guidance': {'anchor': 'bottom-left'}}, handle)
+        handle.close()
+        cls._config_path = handle.name
+        cls.bridge = DashboardBridge(
+            DashboardConfig(status_endpoint='', annotation_endpoint=''),
+            TelemetryModel(), AnnotationState(),
+            hud_config=load_hud_config(cls._config_path))
+        cls.view = QQuickView()
+        cls.view.engine().addImageProvider('frames', FrameImageProvider())
+        cls.view.rootContext().setContextProperty('bridge', cls.bridge)
+        qml_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'qml')
+        cls.view.setSource(
+            QUrl.fromLocalFile(os.path.join(qml_dir, 'Dashboard.qml')))
+        cls.root = cls.view.rootObject()
+        cls.root.setProperty('width', 1920)
+        cls.root.setProperty('height', 1080)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.view.deleteLater()
+        cls.app.processEvents()
+        del cls.view
+        os.unlink(cls._config_path)
+
+    def test_center_range_with_side_guide_no_overlap(self):
+        self.bridge.set_view('cutter')
+        for _ in range(10):
+            self.app.processEvents()
+        from PySide2.QtCore import QObject
+        loaders = [c for c in self.root.findChildren(QObject)
+                   if c.metaObject().className() == 'QQuickLoader']
+        cutter_range, cutter_guidance = loaders[2], loaders[3]
+        self.assertTrue(cutter_range.property('active'))
+        if not cutter_guidance.property('visible'):
+            # Hiding is also acceptable; there is no overlap.
+            return
+        range_left = _abs_left_x(cutter_range, self.root)
+        guide_right = _abs_left_x(cutter_guidance, self.root) \
+            + cutter_guidance.property('width')
+        self.assertLessEqual(
+            guide_right, range_left,
+            'side guidance overlaps a centered range panel')
 
 
 if __name__ == '__main__':

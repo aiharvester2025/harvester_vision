@@ -26,7 +26,8 @@ Item {
     }
 
     // Operator sensor HUDs (Boom bottom-right, Docking Ranges bottom-left,
-    // Cutter Range on the cutter view). Each panel self-anchors from the admin
+    // Docking Safety bottom-center on the docking view; Cutter Range and Cutter
+    // Safety on the cutter view). Each panel self-anchors from the admin
     // layout, so this host fills the overlay and gates nothing itself.
     SensorPanel {
         id: sensor_panel

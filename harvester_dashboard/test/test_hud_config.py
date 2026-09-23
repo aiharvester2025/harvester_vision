@@ -24,6 +24,8 @@ def _layout_with(boom_visible: bool, docking_visible: bool,
         docking=panel(base.docking, docking_visible),
         cutter_range=panel(base.cutter_range, cutter_visible),
         dock_guidance=panel(base.dock_guidance, base.dock_guidance.visible),
+        cutter_guidance=panel(
+            base.cutter_guidance, base.cutter_guidance.visible),
     )
 
 
@@ -40,11 +42,14 @@ class HudConfigDefaultsTest(unittest.TestCase):
 
     def test_none_path_resolves_shipped_config(self):
         # With no --hud-config, the shipped file must be picked up so its
-        # panels (e.g. dock_guidance) reach a normal run_all.sh deploy.
+        # panels (e.g. dock_guidance, cutter_guidance) reach a normal
+        # run_all.sh deploy.
         path = default_hud_config_path()
         self.assertTrue(path.exists(), path)
         self.assertEqual(load_hud_config(None).dock_guidance.caption,
                          load_hud_config(str(path)).dock_guidance.caption)
+        self.assertEqual(load_hud_config(None).cutter_guidance.caption,
+                         load_hud_config(str(path)).cutter_guidance.caption)
 
     def test_defaults_missing_file(self):
         layout = load_hud_config('/nonexistent/hud.json')
@@ -66,7 +71,7 @@ class HudConfigDefaultsTest(unittest.TestCase):
     def test_to_qml_shape(self):
         qml = default_hud_layout().to_qml()
         self.assertEqual(set(qml), {'boom', 'docking', 'cutter_range',
-                                    'dock_guidance'})
+                                    'dock_guidance', 'cutter_guidance'})
         self.assertEqual(qml['boom']['valueFontPx'],
                          default_hud_layout().boom.value_font_px)
         self.assertEqual(qml['docking']['anchor'], 'bottom-left')
@@ -92,6 +97,32 @@ class HudConfigDefaultsTest(unittest.TestCase):
         self.assertIn('bannerFontPx', panel)
         self.assertIn('pulseDanger', panel)
         self.assertAlmostEqual(panel['stopbarRangeM'], 1.5)
+
+    def test_cutter_guidance_defaults(self):
+        layout = default_hud_layout()
+        panel = layout.cutter_guidance
+        self.assertTrue(panel.visible)
+        # Same config file as the other HUDs, bottom-center on the cutter view.
+        self.assertEqual(panel.anchor, 'bottom-center')
+        self.assertEqual(panel.caption, 'CUTTER SAFETY')
+        self.assertGreaterEqual(panel.value_font_px, 40)
+        self.assertGreaterEqual(panel.banner_font_px, 30)
+        # Cutter clearances are small: the bar full-scale is 1 m.
+        self.assertAlmostEqual(panel.stopbar_range_m, 1.0)
+        self.assertTrue(panel.pulse_danger)
+        self.assertTrue(panel.show_confirm_button)
+        # The metric row captions are named for the cutter columns.
+        self.assertEqual(panel.rows['phase'], 'Cut Step')
+        self.assertEqual(panel.rows['clearance'], 'Clearance')
+        self.assertEqual(panel.rows['max_speed'], 'Max Safe')
+
+    def test_cutter_guidance_to_qml_extras(self):
+        panel = default_hud_layout().to_qml()['cutter_guidance']
+        for key in ('stopbarRangeM', 'bannerFontPx', 'pulseDanger',
+                    'showConfirmButton'):
+            self.assertIn(key, panel)
+        self.assertAlmostEqual(panel['stopbarRangeM'], 1.0)
+        self.assertTrue(panel['showConfirmButton'])
 
 
 class HudConfigOverrideTest(unittest.TestCase):
@@ -164,6 +195,36 @@ class HudConfigOverrideTest(unittest.TestCase):
                             'mystery_panel': {'anchor': 'top-left'}})
         layout = load_hud_config(path)
         self.assertEqual(layout.docking.anchor, 'bottom-left')
+
+    def test_cutter_guidance_override(self):
+        path = self._write({
+            'cutter_guidance': {
+                'anchor': 'bottom-right',
+                'caption': 'CUTTER GUIDE',
+                'width': 500,
+                'visible': False,
+                'banner_font_px': 44,
+                'stopbar_range_m': 0.5,
+                'pulse_danger': False,
+                'show_confirm_button': False,
+                'rows': {'phase': 'Step'},
+            },
+        })
+        layout = load_hud_config(path)
+        panel = layout.cutter_guidance
+        self.assertEqual(panel.anchor, 'bottom-right')
+        self.assertEqual(panel.caption, 'CUTTER GUIDE')
+        self.assertEqual(panel.width, 500)
+        self.assertFalse(panel.visible)
+        self.assertEqual(panel.banner_font_px, 44)
+        self.assertAlmostEqual(panel.stopbar_range_m, 0.5)
+        self.assertFalse(panel.pulse_danger)
+        self.assertFalse(panel.show_confirm_button)
+        self.assertEqual(panel.rows['phase'], 'Step')
+        # Unmentioned default rows survive the merge.
+        self.assertIn('clearance', panel.rows)
+        # The docking panel is untouched by a cutter-only override.
+        self.assertEqual(layout.dock_guidance.caption, 'DOCKING SAFETY')
 
     def test_invalid_anchor_falls_back(self):
         path = self._write({'docking': {'anchor': 'sideways'}})

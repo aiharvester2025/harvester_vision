@@ -71,5 +71,28 @@
       "ttc": "TTC",
       "max_speed": "Max Safe"
     }
+  },
+  "cutter_guidance": {
+    "visible": true,
+    "anchor": "bottom-center",
+    "caption": "CUTTER SAFETY",
+    "width": 620,
+    "height": 0,
+    "value_font_px": 46,
+    "caption_font_px": 30,
+    "margin_px": 12,
+    "opacity": 0.85,
+    "stopbar_range_m": 1.0,
+    "banner_font_px": 40,
+    "pulse_danger": true,
+    "show_confirm_button": true,
+    "rows": {
+      "state": "State",
+      "phase": "Cut Step",
+      "clearance": "Clearance",
+      "speed": "Closing Speed",
+      "ttc": "TTC",
+      "max_speed": "Max Safe"
+    }
   }
 }

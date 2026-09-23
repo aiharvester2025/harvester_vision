@@ -31,16 +31,21 @@ QML**, and it is strictly **render-only** (no socket writes from view/toggle con
   - `HudOverlay.qml` — MIXED-SOURCES warning, the operator sensor panels host
     (`SensorPanel`), right trunk/calibration, bottom stream-errors panel
     (diagnostic-gated).
-  - `SensorPanel.qml` — hosts the four config-driven operator panels in Loaders,
+  - `SensorPanel.qml` — hosts the five config-driven operator panels in Loaders,
     anchored from `bridge.hudLayout`: **Boom** (bottom-right; PLC MQTT values:
     boom angle, boom length, slew angle, platform tilt X1/Y1, prime mover tilt
     X2/Y2), **Docking Ranges** (bottom-left, + phase guide), **Cutter Range**
-    (cutter view only), and **Docking Safety** (bottom-center, docking view only).
+    (cutter view only), **Docking Safety** (bottom-center, docking view only),
+    and **Cutter Safety** (bottom-center, cutter view only).
   - `SensorHudPanel.qml` — generic panel (caption + caption/value rows) driven by
     a `bridge.hudLayout.<name>` config object and a rows model.
   - `DockGuidanceHud.qml` — docking safety-guidance panel (state banner,
     stop-bar, metrics), driven by `bridge.hudLayout.dock_guidance` and the
     `bridge.dock*` properties (see `safety_guidance.py`).
+  - `CutterGuidanceHud.qml` — cutter safety-guide panel (cut-step banner,
+    clearance alert, clearance bar, metrics, CONFIRM STEP prompt), driven by
+    `bridge.hudLayout.cutter_guidance` and the `bridge.cutter*` properties (see
+    `cutter_safety_guidance.py`).
   - `CameraView.qml` — camera image (image://frames), stale ring + timestamp line
     (diagnostic-gated), click annotation, crosshair.
   - `LidarInset.qml`, `PointCloudInset.qml`, `Annotation.qml` — inset overlays.
@@ -91,6 +96,57 @@ The HUD is split into two independently-toggled layers:
   strings. The `Docking Ranges` panel rows for the two
   ultrasonic side sensors are labelled `Left`/`Right`
   (`c_channel_left`/`c_channel_right`).
+
+- **Cutter safety guidance** (`bridge.cutter*`, cutter view only): the sibling
+  of the docking guidance, for the cutting arm. A pure-Python model
+  (`cutter_safety_guidance.py`) applies the sensor→tip offset
+  (`tip_clearance = raw_range − sensor_to_tip_offset_m`, ~0.19 m; the sensor sits
+  behind the tip) and maps (closing speed, clearance) onto
+  `safe`/`warn`/`danger`/`no_data` with the same stopping-distance scheme, plus a
+  cut-sequence phase machine (`idle → approach → align → open → advance → cut`).
+  `bridge.py` derives the closing speed from the `cutter_forward` record on
+  `v1/range/cutter` (least-squares slope over ~1.5 s, EMA-smoothed), tracks
+  staleness, advances the measured `approach → align` step, applies the debounce,
+  and exposes `cutterSafetyState/cutterPhase/cutterGuidanceText/cutterPhaseText/
+  cutterClearanceM/cutterRawRangeM/cutterSpeedSmoothedCmS/cutterMaxSpeedCmS/
+  cutterStopDistanceM/cutterTtcS/cutterCanConfirm/cutterSafetyRow`. Thresholds
+  come from `--cutter-config` (`config/cutter_safety_guidance.json`).
+  `CutterGuidanceHud.qml` renders it; its layout is the `cutter_guidance` panel
+  in the same `--hud-config` file. Advisory only and render-only. It is gated on
+  the same key-1 cutter HUD flag (`bridge.cutterHudVisible`) as the Cutter Range
+  panel, so key 1 hides/shows both cutter-view HUDs together — keep those two
+  loaders' `active` conditions in sync.
+
+  Placement: on the cutter view the Cutter Range panel is positioned by its own
+  configured `anchor` (default bottom-left, but movable to either edge or the
+  center via `--hud-config`); the guidance panel is positioned per its own
+  `anchor` inside the reserved free band. A `center` anchor centers it on the
+  **screen** (not in the leftover gap, which would sit visibly off-center), and
+  the panel is shrunk — then hidden — rather than allowed to overlap the Cutter
+  Range HUD. Keep `layoutCutterRow` reserving whichever side the range panel is
+  anchored to, and hide when a centered range would collide (see the invariants
+  below). The docking-view bottom row (`layoutBottomRow`) is unchanged.
+
+  Invariants worth protecting: (1) the phase may enter `align` ("STOP — ready to
+  cut") **only** when the tip is inside the ready band, settled
+  (`speed ≤ warn_margin·v_max`), **and** not inside the danger floor. The ready
+  band sits inside `warn_clearance` by design (the tip settles in a stable WARN
+  "ready-to-cut" state), so `align` legitimately coincides with `warn` but must
+  **never** coincide with `danger`/`no_data` — keep the danger-floor guard in
+  `next_phase`; (2) `align → open → advance → cut` are operator-confirmed
+  via the bridge slot `cutter_confirm_phase()`, which is a **no-op while
+  DANGER/NO_DATA** (the CONFIRM STEP button is disabled and relabelled "WAIT —
+  tip too close" for danger, "WAIT — no range" for no_data); (3) a range dropout
+  **holds** an in-progress operator phase rather than resetting it; (4) `no_data`
+  is grey and never a false green, and non-finite ranges are `no_data` at the
+  model level; (5) the cutter guidance loader must share key-1's
+  `bridge.cutterHudVisible` gate with the Cutter Range loader, and the cutter row
+  layout must reserve space on whichever side the Cutter Range panel is anchored
+  (it can be moved to the right or center via `--hud-config`) and hide rather than
+  overlap — a centered range panel confines the guidance panel to a free side band
+  and hides it if the guidance is also centered.
+  The depth camera/LiDAR do **not** feed the clearance (they are on the arm base,
+  off the extension) — never imply fusion.
 
 - **Developer-diagnostic HUD** (`7` `7` `7` + `Enter` → `bridge.diagnosticVisible`): bottom
   stream table, toolbar status line, active-camera timestamp line, stale-camera ring.

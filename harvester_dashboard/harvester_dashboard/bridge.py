@@ -32,6 +32,8 @@ from .status_client import StatusClient
 
 from . import safety_guidance
 from .safety_guidance import DANGER, NO_DATA, SAFE, WARN, SafetyConfig
+from . import cutter_safety_guidance
+from .cutter_safety_guidance import CutterConfig
 
 
 if _QT_AVAILABLE:
@@ -51,6 +53,7 @@ if _QT_AVAILABLE:
         trunk_changed = Signal()
         boom_changed = Signal()
         dock_safety_changed = Signal()
+        cutter_safety_changed = Signal()
         mqtt_sensors_changed = Signal()
         calibration_changed = Signal()
         stream_rows_changed = Signal()
@@ -72,6 +75,7 @@ if _QT_AVAILABLE:
                      annotation: AnnotationState, annotation_publisher=None,
                      hud_config: Optional[HudLayoutConfig] = None,
                      safety_config: Optional[SafetyConfig] = None,
+                     cutter_config: Optional[CutterConfig] = None,
                      parent=None):
             super().__init__(parent)
             self.config = config
@@ -86,6 +90,10 @@ if _QT_AVAILABLE:
             self.safety_config = (safety_config if safety_config is not None
                                   else SafetyConfig.load(
                                       safety_guidance.default_config_path()))
+            # Cutter safety-guidance thresholds (same contract).
+            self.cutter_config = (cutter_config if cutter_config is not None
+                                  else CutterConfig.load(
+                                      cutter_safety_guidance.default_config_path()))
             self.status_client = (
                 StatusClient(config.status_endpoint,
                              timeout_ms=self.STATUS_TIMEOUT_MS)
@@ -144,6 +152,24 @@ if _QT_AVAILABLE:
                 None, None, self.safety_config)
             self._guidance_state = NO_DATA
             self._guidance_state_since = time.monotonic()
+            # Cutter safety-guidance state.  Kept fully independent of the
+            # docking section (separate samples/state/phase): the two channels
+            # are unrelated and must not share a fit window or a debounce clock.
+            self._cutter_samples: deque = deque()
+            self._last_cutter_sample: Optional[tuple] = None
+            self._cutter_speed_fit_key: Optional[tuple] = None
+            self._cutter_speed_raw: Optional[float] = None      # cm/s
+            self._cutter_speed_smoothed: Optional[float] = None  # cm/s
+            self._cutter_raw_range: Optional[float] = None       # m (raw)
+            self._cutter_clearance: Optional[float] = None       # m (offset)
+            # Cut-sequence phase (ADVISORY prompt only; never commands motion).
+            self._cutter_phase = cutter_safety_guidance.PHASE_IDLE
+            # Initial state is NO_DATA / IDLE (never SAFE) so the HUD never
+            # shows a reassuring green before any cutter range has arrived.
+            self._cutter_guidance = cutter_safety_guidance.evaluate(
+                None, None, self.cutter_config)
+            self._cutter_state = NO_DATA
+            self._cutter_state_since = time.monotonic()
             self._refresh = QTimer(self)
             self._refresh.timeout.connect(self.refresh)
             self._refresh.start(200)
@@ -616,6 +642,8 @@ if _QT_AVAILABLE:
         def refresh(self) -> None:
             self._update_dock_speed()
             self._recompute_safety_guidance()
+            self._update_cutter_speed()
+            self._recompute_cutter_guidance()
             self.source_badge_changed.emit()
             self.ranges_changed.emit()
             self.trunk_changed.emit()
@@ -1013,6 +1041,347 @@ if _QT_AVAILABLE:
             ]
             return rows
 
+        # -- cutter safety guidance --------------------------------------------
+        # Sibling of the docking guidance, for the cutting arm: the single
+        # forward range sensor (``v1/range/cutter``, ``telemetry_key``
+        # ``cutter_forward``) measures the tip's clearance to the object.  The
+        # sensor sits BEHIND the tip, so the raw reading is offset-corrected by
+        # the model (``tip_clearance_m``).  On top of the clearance state a
+        # small cut-sequence phase machine prompts the operator
+        # (approach -> align -> open -> advance -> cut); it is advisory only and
+        # NEVER commands motion.  No socket is ever written from this path.
+        #
+        # Least-squares window over which the closing speed is estimated (kept
+        # separate from the docking window so the two channels never mix).
+        _CUTTER_SPEED_MAX_SAMPLE_AGE_S = 1.5
+
+        def _cutter_range_m(self, cutter=None) -> Optional[float]:
+            """Return the raw cutter range (m) or None when absent/invalid."""
+            if cutter is None:
+                _records, cutter = self.model.snapshot_ranges()
+            if not isinstance(cutter, dict):
+                return None
+            if not cutter.get('valid', False):
+                return None
+            distance = cutter.get('distance_m')
+            if distance is None:
+                return None
+            try:
+                value = float(distance)
+            except (TypeError, ValueError, OverflowError):
+                return None
+            # Reject non-finite readings (the wire JSON may carry NaN/Inf).
+            if not math.isfinite(value):
+                return None
+            return value
+
+        def _cutter_range_receipt_age_s(self) -> Optional[float]:
+            """Local receipt age (s) of the last ``v1/range/cutter`` packet.
+
+            Staleness tracks when the *wire* delivered a cutter range record,
+            not when the bridge last read the retained JSON, so a silent cutter
+            stream ages out to NO_DATA.
+            """
+            state = self.model.state('v1/range/cutter')
+            if state.last_recv_monotonic_s is None:
+                return None
+            return max(0.0, time.monotonic() - state.last_recv_monotonic_s)
+
+        def _update_cutter_speed(self) -> None:
+            """Derive the cutter tip closing speed from the raw cutter range.
+
+            Samples the raw range once per *new* ``v1/range/cutter`` wire packet
+            and fits the least-squares slope over the window.  The closing speed
+            is the negated slope (a shrinking range is a positive closing speed),
+            in cm/s.  The offset is applied later by the model, so the derivative
+            and the clearance stay consistent.  A missing/invalid/absent cutter
+            range clears the derived values so staleness drives NO_DATA.
+            """
+            now = time.monotonic()
+            state = self.model.state('v1/range/cutter')
+            receipt = state.last_recv_monotonic_s
+            range_m = self._cutter_range_m()
+            stale = (receipt is None
+                     or (now - receipt) > self.cutter_config.stale_s)
+            if range_m is None or stale:
+                self._cutter_raw_range = None
+                self._cutter_clearance = None
+                self._cutter_speed_raw = None
+                self._cutter_speed_smoothed = None
+                self._cutter_speed_fit_key = None
+                while (self._cutter_samples
+                       and now - self._cutter_samples[0][0]
+                       > self._CUTTER_SPEED_MAX_SAMPLE_AGE_S):
+                    self._cutter_samples.popleft()
+                return
+
+            self._cutter_raw_range = range_m
+            self._cutter_clearance = cutter_safety_guidance.tip_clearance_m(
+                range_m, self.cutter_config)
+            # Dedup on the (receipt, range) pair: two packets can share a
+            # monotonic receipt stamp while carrying different ranges.
+            if ((receipt, range_m) != self._last_cutter_sample
+                    or not self._cutter_samples):
+                self._cutter_samples.append((receipt, range_m))
+                self._last_cutter_sample = (receipt, range_m)
+            while (self._cutter_samples
+                   and now - self._cutter_samples[0][0]
+                   > self._CUTTER_SPEED_MAX_SAMPLE_AGE_S):
+                self._cutter_samples.popleft()
+
+            if len(self._cutter_samples) < 2:
+                # Not enough samples to fit a slope: report NO speed (None),
+                # never 0.0 (a zeroed speed would read as "not approaching").
+                self._cutter_speed_raw = None
+                self._cutter_speed_fit_key = None
+                return
+            fit_key = (len(self._cutter_samples), self._cutter_samples[0],
+                       self._cutter_samples[-1])
+            if fit_key == self._cutter_speed_fit_key:
+                return
+            times = np.array([s[0] for s in self._cutter_samples],
+                             dtype=np.float64)
+            ranges = np.array([s[1] for s in self._cutter_samples],
+                              dtype=np.float64)
+            times = times - times.mean()
+            denominator = float(np.dot(times, times))
+            if denominator <= 0.0:
+                # All samples share a timestamp: no slope is defined.
+                self._cutter_speed_fit_key = fit_key
+                self._cutter_speed_raw = None
+                return
+            slope = float(np.dot(times, ranges - ranges.mean()) / denominator)
+            self._cutter_speed_raw = -slope * 100.0
+            self._cutter_speed_fit_key = fit_key
+
+        def _recompute_cutter_guidance(self) -> None:
+            """EMA-smooth the speed, advance the phase, evaluate, and debounce.
+
+            ``danger`` and ``no_data`` are adopted immediately; only
+            ``safe``/``warn`` transitions are debounced.  When a state is held,
+            the displayed message matches the *held* state (never a STOP message
+            on an orange banner).
+            """
+            cfg = self.cutter_config
+            now = time.monotonic()
+            raw = self._cutter_speed_raw
+            if raw is None:
+                self._cutter_speed_smoothed = None
+            elif self._cutter_speed_smoothed is None:
+                self._cutter_speed_smoothed = raw
+            else:
+                alpha = cfg.speed_ema_alpha
+                self._cutter_speed_smoothed = (
+                    alpha * raw + (1.0 - alpha) * self._cutter_speed_smoothed)
+
+            # Staleness is authoritative on its own: any missing/aged-out
+            # receipt forces NO_DATA even if a range or speed is retained.
+            age = self._cutter_range_receipt_age_s()
+            stale = age is None or age > cfg.stale_s
+
+            # Missing speed but a fresh clearance: evaluate with 0 cm/s so the
+            # absolute clearance floor still applies, without letting the absent
+            # speed clear an already-issued WARN/DANGER.
+            speed_for_eval = self._cutter_speed_smoothed
+            if (speed_for_eval is None and not stale
+                    and self._cutter_clearance is not None):
+                speed_for_eval = 0.0
+
+            # Advance the measured phase step (approach -> align) from the
+            # settled tip.  The phase uses the *fitted* speed, and an unknown
+            # speed is treated as "not settled" (inf), never as 0: a tip whose
+            # closing speed cannot be measured must not be promoted to
+            # "ready to cut".  Operator-confirmed phases hold here.
+            phase_speed = (self._cutter_speed_smoothed
+                           if self._cutter_speed_smoothed is not None
+                           else float('inf'))
+            self._cutter_phase = cutter_safety_guidance.next_phase(
+                self._cutter_phase, self._cutter_clearance, phase_speed,
+                cfg, stale=stale)
+
+            candidate = cutter_safety_guidance.evaluate(
+                speed_for_eval, self._cutter_clearance, cfg,
+                stale=stale, phase=self._cutter_phase)
+            if (self._cutter_speed_smoothed is None and not stale
+                    and self._cutter_state in (WARN, DANGER)
+                    and candidate.state == SAFE):
+                # Missing speed must not clear a held WARN/DANGER.
+                candidate = candidate.__class__(
+                    self._cutter_state, candidate.phase, candidate.clearance_m,
+                    candidate.speed_cm_s, candidate.ttc_s,
+                    candidate.stop_distance_m, candidate.max_speed_cm_s,
+                    candidate.recommended_speed_cm_s,
+                    cutter_safety_guidance.state_message(
+                        self._cutter_state, candidate),
+                    candidate.phase_message)
+
+            new_state = candidate.state
+            adopt = (new_state in (DANGER, NO_DATA)
+                     or new_state == self._cutter_state
+                     or (now - self._cutter_state_since) >= cfg.debounce_s)
+            if not adopt:
+                return
+
+            if new_state != self._cutter_state:
+                self._cutter_state = new_state
+                self._cutter_state_since = now
+
+            if candidate.state == self._cutter_state:
+                guidance = candidate
+            else:
+                guidance = candidate.__class__(
+                    self._cutter_state, candidate.phase, candidate.clearance_m,
+                    candidate.speed_cm_s, candidate.ttc_s,
+                    candidate.stop_distance_m, candidate.max_speed_cm_s,
+                    candidate.recommended_speed_cm_s,
+                    cutter_safety_guidance.state_message(
+                        self._cutter_state, candidate),
+                    candidate.phase_message)
+
+            if guidance != self._cutter_guidance:
+                self._cutter_guidance = guidance
+                self.cutter_safety_changed.emit()
+
+        @Slot()
+        def cutter_confirm_phase(self) -> None:
+            """Advance the operator-confirmed cut-sequence prompt by one step.
+
+            The scissors/gripper/advance actions have no sensors, so the operator
+            confirms them on the HUD.  This is a **no-op while DANGER or
+            NO_DATA** (the tip is too close, or there is no range), so the cut
+            sequence can never be advanced into a collision.  It only advances a
+            prompt; it never commands the arm.
+            """
+            if self._cutter_state in (DANGER, NO_DATA):
+                return
+            new_phase = cutter_safety_guidance.advance_phase(self._cutter_phase)
+            if new_phase == self._cutter_phase:
+                return
+            self._cutter_phase = new_phase
+            self._recompute_cutter_guidance()
+            self.cutter_safety_changed.emit()
+
+        def _get_cutter_safety_state(self) -> str:
+            return self._cutter_state
+
+        def _get_cutter_phase(self) -> str:
+            return self._cutter_phase
+
+        def _get_cutter_guidance_text(self) -> str:
+            return self._cutter_guidance.message
+
+        def _get_cutter_phase_text(self) -> str:
+            # Derived live from the current phase (not the debounce-held
+            # guidance object), so the banner prompt always matches the phase
+            # the CONFIRM STEP button acts on.  The phase advances immediately
+            # while the clearance *state* may still be debouncing.
+            return cutter_safety_guidance.phase_message(
+                self._cutter_phase, self.cutter_config)
+
+        def _get_cutter_clearance_m(self) -> float:
+            value = self._cutter_guidance.clearance_m
+            if value is None:
+                value = self._cutter_clearance
+            return float('nan') if value is None else float(value)
+
+        def _get_cutter_raw_range_m(self) -> float:
+            return (float('nan') if self._cutter_raw_range is None
+                    else float(self._cutter_raw_range))
+
+        def _get_cutter_speed_smoothed_cm_s(self) -> float:
+            return (float('nan') if self._cutter_speed_smoothed is None
+                    else float(self._cutter_speed_smoothed))
+
+        def _get_cutter_max_speed_cm_s(self) -> float:
+            value = self._cutter_guidance.max_speed_cm_s
+            return float('nan') if value is None else float(value)
+
+        def _get_cutter_stop_distance_m(self) -> float:
+            value = self._cutter_guidance.stop_distance_m
+            return float('nan') if value is None else float(value)
+
+        def _get_cutter_ttc_s(self) -> float:
+            value = self._cutter_guidance.ttc_s
+            return float('nan') if value is None else float(value)
+
+        def _get_cutter_can_confirm(self) -> bool:
+            """True when the CONFIRM STEP prompt may advance (not DANGER/NO_DATA)."""
+            return (self._cutter_state not in (DANGER, NO_DATA)
+                    and self._cutter_phase not in (
+                        cutter_safety_guidance.PHASE_IDLE,
+                        cutter_safety_guidance.PHASE_APPROACH))
+
+        def _get_cutter_safety_row(self):
+            """Metric rows for the cutter guidance HUD in the shared shape.
+
+            Values are pre-formatted with an em dash when absent.  Captions come
+            from the ``cutter_guidance.rows`` config (falling back to the
+            built-in label) so the panel and the config agree.
+            """
+            guidance = self._cutter_guidance
+            row_labels = self.hud_config.cutter_guidance.rows or {}
+
+            def _label(key: str, fallback: str) -> str:
+                value = row_labels.get(key)
+                return value if isinstance(value, str) and value else fallback
+
+            def _number(value: Optional[float], fmt: str) -> str:
+                if value is None:
+                    return '—'
+                try:
+                    return fmt.format(float(value))
+                except (TypeError, ValueError, OverflowError):
+                    return '—'
+
+            state_label = {
+                'safe': 'TIP CLEAR',
+                'warn': 'SLOW',
+                'danger': 'STOP',
+                'no_data': 'NO DATA',
+            }.get(self._cutter_state, self._cutter_state.upper())
+
+            # Report the closing speed magnitude with an explicit direction so a
+            # receding tip is not shown as a negative "closing" speed.
+            speed = guidance.speed_cm_s
+            if speed is None:
+                speed_value = '—'
+            elif speed > 0.0:
+                speed_value = '{:.1f} cm/s'.format(speed)
+            elif speed < 0.0:
+                speed_value = 'receding {:.1f} cm/s'.format(-speed)
+            else:
+                speed_value = '0.0 cm/s'
+
+            phase_label = {
+                cutter_safety_guidance.PHASE_IDLE: 'Idle',
+                cutter_safety_guidance.PHASE_APPROACH: 'Approach',
+                cutter_safety_guidance.PHASE_ALIGN: 'Align',
+                cutter_safety_guidance.PHASE_OPEN: 'Open',
+                cutter_safety_guidance.PHASE_ADVANCE: 'Advance',
+                cutter_safety_guidance.PHASE_CUT: 'Cut',
+            }.get(self._cutter_phase, self._cutter_phase)
+
+            return [
+                {'key': 'state', 'label': _label('state', 'State'),
+                 'value': state_label,
+                 'valid': self._cutter_state not in (NO_DATA,)},
+                {'key': 'phase', 'label': _label('phase', 'Phase'),
+                 'value': phase_label,
+                 'valid': self._cutter_phase != cutter_safety_guidance.PHASE_IDLE},
+                {'key': 'clearance', 'label': _label('clearance', 'Clearance'),
+                 'value': _number(guidance.clearance_m, '{:.2f} m'),
+                 'valid': guidance.clearance_m is not None},
+                {'key': 'speed', 'label': _label('speed', 'Closing Speed'),
+                 'value': speed_value,
+                 'valid': guidance.speed_cm_s is not None},
+                {'key': 'ttc', 'label': _label('ttc', 'TTC'),
+                 'value': _number(guidance.ttc_s, '{:.1f} s'),
+                 'valid': guidance.ttc_s is not None},
+                {'key': 'max_speed', 'label': _label('max_speed', 'Max Safe'),
+                 'value': _number(guidance.max_speed_cm_s, '{:.0f} cm/s'),
+                 'valid': guidance.max_speed_cm_s is not None},
+            ]
+
         # -- boom / leveling / phase guide -------------------------------------
         def _get_boom(self):
             return self.model.snapshot_boom() or {}
@@ -1325,6 +1694,31 @@ if _QT_AVAILABLE:
             float, _get_dock_stop_distance_m, notify=dock_safety_changed)
         dockTtcS = Property(
             float, _get_dock_ttc_s, notify=dock_safety_changed)
+        cutterSafetyState = Property(
+            str, _get_cutter_safety_state, notify=cutter_safety_changed)
+        cutterPhase = Property(
+            str, _get_cutter_phase, notify=cutter_safety_changed)
+        cutterGuidanceText = Property(
+            str, _get_cutter_guidance_text, notify=cutter_safety_changed)
+        cutterPhaseText = Property(
+            str, _get_cutter_phase_text, notify=cutter_safety_changed)
+        cutterClearanceM = Property(
+            float, _get_cutter_clearance_m, notify=cutter_safety_changed)
+        cutterRawRangeM = Property(
+            float, _get_cutter_raw_range_m, notify=cutter_safety_changed)
+        cutterSpeedSmoothedCmS = Property(
+            float, _get_cutter_speed_smoothed_cm_s, notify=cutter_safety_changed)
+        cutterMaxSpeedCmS = Property(
+            float, _get_cutter_max_speed_cm_s, notify=cutter_safety_changed)
+        cutterStopDistanceM = Property(
+            float, _get_cutter_stop_distance_m, notify=cutter_safety_changed)
+        cutterTtcS = Property(
+            float, _get_cutter_ttc_s, notify=cutter_safety_changed)
+        cutterCanConfirm = Property(
+            bool, _get_cutter_can_confirm, notify=cutter_safety_changed)
+        cutterSafetyRow = Property(
+            'QVariantList', _get_cutter_safety_row,
+            notify=cutter_safety_changed)
         mqttSensorRows = Property(
             'QVariantList', _get_mqtt_sensor_rows, notify=mqtt_sensors_changed)
         calibrationLine = Property(

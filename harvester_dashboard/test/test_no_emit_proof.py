@@ -68,16 +68,25 @@ class NoEmitProofTest(unittest.TestCase):
 
         # Feed a shrinking center-range series so the safety-guidance path
         # (speed derivation + evaluation + HUD properties) actually runs, then
-        # drive every view control many times while spinning the loop.
+        # drive every view control many times while spinning the loop.  A
+        # shrinking cutter range drives the cutter guidance path too, including
+        # the operator-confirmed cut-sequence prompt.
         import time as _time
         distance = 3.0
+        cutter_distance = 1.0
         for _ in range(20):
             distance = max(0.2, distance - 0.05)
+            cutter_distance = max(0.25, cutter_distance - 0.03)
             from helpers import json_packet
             model.ingest_frames(json_packet('v1/range/docking', [
                 {'telemetry_key': 'center_line', 'distance_m': distance,
                  'valid': True}], sequence=int(_time.time() * 10) % 1000 + 1))
+            model.ingest_frames(json_packet('v1/range/cutter', {
+                'telemetry_key': 'cutter_forward',
+                'distance_m': cutter_distance, 'valid': True},
+                sequence=int(_time.time() * 10) % 1000 + 1))
             bridge.refresh()
+            bridge.cutter_confirm_phase()
             bridge.set_view('docking')
             bridge.set_view('cutter')
             bridge.select_cutter_view()

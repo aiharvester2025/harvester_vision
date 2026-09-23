@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "description": "Cutter (cutting-arm) safety-guidance thresholds for the operator HUD.",
+  "units": {
+    "offset": "meters (sensor face to cutter tip, forward)",
+    "a_max": "m/s^2 (max safe cutter deceleration)",
+    "latency": "seconds (operator reaction + actuation latency)",
+    "clearance": "meters (offset-corrected tip-to-object distance)",
+    "speed": "cm/s (positive = closing on the object)",
+    "epsilon": "cm/s (below this the cutter is considered stationary)",
+    "stale": "seconds (range age beyond which the HUD shows NO DATA)"
+  },
+
+  "sensor_to_tip_offset_m": 0.19,
+
+  "a_max_m_s2": 0.10,
+  "latency_s": 0.30,
+  "warn_margin": 0.7,
+
+  "warn_clearance_m": 0.30,
+  "danger_clearance_m": 0.10,
+
+  "ready_standoff_m": 0.20,
+  "advance_distance_m": 0.05,
+  "align_tolerance_m": 0.05,
+
+  "stationary_epsilon_cm_s": 0.5,
+  "stale_s": 2.0,
+  "debounce_s": 0.4,
+
+  "speed_ema_alpha": 0.35
+}

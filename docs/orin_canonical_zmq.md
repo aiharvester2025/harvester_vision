@@ -166,7 +166,9 @@ defaults and documents every accepted key:
     "rows": { "boom_angle_deg": "Boom Angle" }
   },
   "docking": { "anchor": "bottom-left", "rows": { "center_line": "Center" } },
-  "cutter_range": { "anchor": "bottom-left", "caption": "CUTTER RANGE" }
+  "cutter_range": { "anchor": "bottom-left", "caption": "CUTTER RANGE" },
+  "dock_guidance": { "anchor": "bottom-center", "caption": "DOCKING SAFETY" },
+  "cutter_guidance": { "anchor": "bottom-center", "caption": "CUTTER SAFETY" }
 }
 ```
 
@@ -245,6 +247,73 @@ other sensor HUDs, under the `dock_guidance` key:
   }
 }
 ```
+
+#### Cutter safety guidance (advisory, operator-facing)
+
+The **Cutter Safety** panel (default bottom-center, **cutter view only**) is the
+sibling of the docking guidance, for the cutting arm. It is shown/hidden together
+with the Cutter Range HUD by key `1` on the cutter view. It (1) warns the operator
+before the cutter **tip** crashes into the trunk / FFB / frond, and (2) prompts
+the **cut sequence**: approach → stop/ready → open scissors wide → advance →
+cut. It is **advisory only**: the dashboard never commands motion, and the
+scissors/gripper are hydraulic operator actions with no sensing.
+
+The **only** clearance measurement is the single forward range sensor on
+`v1/range/cutter` (telemetry key `cutter_forward`). The depth camera and LiDAR
+are mounted on the arm base and do **not** follow the extension, so they cannot
+see the tip — there is **no fusion**. The sensor sits **behind** the tip, so the
+raw range overstates the true clearance; the model applies the tunable offset
+`tip_clearance = raw_range − sensor_to_tip_offset_m` (URDF-derived ≈ 0.19 m).
+The closing speed is derived dashboard-side as the least-squares slope of the
+raw range over ~1.5 s (`-d(range)/dt`), EMA-smoothed.
+
+The panel shows a colour-coded **cut-step banner** (the current operator prompt),
+a **clearance alert line** (`TIP CLEAR` green / `SLOW …` orange / `STOP` red /
+grey `NO DATA`), a **clearance bar** comparing the tip clearance (fill) with the
+required stopping distance `d_stop(v)` (white marker; red once the marker meets
+the fill), a **metrics row** (clearance · closing speed · TTC · max safe), and a
+**CONFIRM STEP** button that advances the operator-confirmed prompts. As with
+docking, `NO DATA` is grey (never a false green), `danger`/`no_data` bypass the
+debounce, and non-finite ranges are treated as `NO DATA`.
+
+The cut sequence runs `approach → align` automatically, but **only** when the tip
+is inside the ready band, has settled (closing speed ≤ `warn_margin·v_max`), and is
+**not** inside the danger floor. The ready band sits inside the warn clearance by
+design, so a stable WARN "ready-to-cut" state is expected (the panel shows the
+orange `SLOW` clearance line together with the ready prompt); ALIGN never
+coincides with `danger`/`no_data`, so the "ready to cut" prompt cannot appear while
+the tip is inside the danger band. The remaining steps
+(`align → open → advance → cut`) have no sensors and are advanced by the
+**CONFIRM STEP** button, which is **disabled and relabelled** ("WAIT — tip too
+close" for `danger`, "WAIT — no range" for `no_data`) so the sequence cannot be
+advanced into a collision or with no measurement. A brief range dropout
+**holds** an in-progress operator step rather than resetting it.
+
+Thresholds live in `harvester_dashboard/config/cutter_safety_guidance.json`,
+loaded with `--cutter-config` (default: the shipped file; same fallback/sanitize
+contract as `--safety-config`):
+
+```bash
+PYTHONPATH=harvester_dashboard /usr/bin/python3 -m harvester_dashboard.main \
+  --pub tcp://127.0.0.1:5590 --status tcp://127.0.0.1:5600 \
+  --cutter-config harvester_dashboard/config/cutter_safety_guidance.json
+```
+
+Key thresholds: `sensor_to_tip_offset_m` (0.19), `warn_clearance_m` (0.30),
+`danger_clearance_m` (0.10), `ready_standoff_m` (0.20, deliberately clear of the
+danger band), `advance_distance_m` (0.05) and `align_tolerance_m` (0.05).
+`a_max_m_s2`/`latency_s` share the docking values; do not change them without
+operator sign-off. The panel's **location, caption, size, fonts, opacity,
+clearance-bar scale, CONFIRM-button visibility and per-row captions** are
+configured in the **same** `--hud-config` file as the other sensor HUDs, under
+the `cutter_guidance` key (see the example above; its `stopbar_range_m` defaults
+to `1.0` m because cutter clearances are small). A `center` anchor centers the
+panel on the **screen** (not merely in the gap right of the Cutter Range panel),
+and the panel shrinks — then hides — rather than overlap the Cutter Range
+distance HUD on a narrow display. The layout reserves the side the Cutter Range
+panel is anchored to, so moving the range panel to the right (or a side) still
+keeps the two apart; a centered range panel confines the guidance panel to a free
+side band (and hides it if the guidance is also centered).
 
 Notes on the `777`+`Enter` sequence:
 

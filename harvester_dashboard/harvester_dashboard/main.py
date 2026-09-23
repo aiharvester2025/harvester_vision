@@ -52,6 +52,8 @@ def main(argv=None) -> int:
     from .image_provider import FrameImageProvider
     from .hud_config import load_hud_config
     from .safety_guidance import SafetyConfig, default_config_path
+    from . import cutter_safety_guidance
+    from .cutter_safety_guidance import CutterConfig
     from .zmq_source import TelemetrySource
 
     model = TelemetryModel()
@@ -61,10 +63,15 @@ def main(argv=None) -> int:
     # Safety tuning: an explicit --safety-config path, else the shipped file,
     # else the built-in defaults (the loader never raises).
     safety_path = config.safety_config_path or default_config_path()
+    # Cutter tuning: the same contract (--cutter-config, else shipped, else
+    # built-in defaults).
+    cutter_path = (config.cutter_config_path
+                   or cutter_safety_guidance.default_config_path())
     bridge = DashboardBridge(config, model, annotation,
                              annotation_publisher=annotation_publisher,
                              hud_config=load_hud_config(config.hud_config_path),
-                             safety_config=SafetyConfig.load(safety_path))
+                             safety_config=SafetyConfig.load(safety_path),
+                             cutter_config=CutterConfig.load(cutter_path))
     provider = FrameImageProvider()
     source = TelemetrySource(config, model)
     source.on_frame = _make_frame_sink(bridge, provider)
