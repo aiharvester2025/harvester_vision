@@ -227,7 +227,7 @@ same "never a false green" rule the docking guidance uses).
   `BOOM_PIVOT_WORLD_Z = 1.81 m`).
 - Layout/config: the `lidar_scan` panel in the same `--hud-config` file as the
   other sensor HUDs (anchor/caption/size/fonts + `zoom_default_m`, `scan_seconds`,
-  `redraw_hz`, `guide_font_px`, `estimate_font_px`).
+  `redraw_hz`, `scrim_opacity`, `guide_font_px`, `estimate_font_px`).
 - MID-360 IMU: `v1/imu/lidar` (JSON) is routed to `bridge._on_lidar_imu`, which
   converts the sensor-frame attitude in `decoders/livox_imu.py` and applies the
   **same** `decoders/imustab.stabilize_points` the OAK cloud uses. Key `7` toggles

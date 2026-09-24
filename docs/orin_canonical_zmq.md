@@ -236,6 +236,7 @@ defaults and documents every accepted key:
     "zoom_max_m": 40.0,
     "scan_seconds": 15.0,            // guided scan window (s)
     "redraw_hz": 12.0,               // overlay repaint cap (CPU guard)
+    "scrim_opacity": 0.15,           // scan-mode camera dim (0 disables)
     "rows": { "tree_height": "Tree Height", "boom_angle": "Boom Angle" }
   }
 }

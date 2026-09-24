@@ -132,6 +132,10 @@ class HudPanelConfig:
     zoom_max_m: float = 40.0
     scan_seconds: float = 15.0        # guided scan duration (s)
     redraw_hz: float = 12.0           # overlay repaint cap (CPU guard)
+    # Darkness of the full-screen scrim the overlay draws over the camera image
+    # while LiDAR scan mode is active.  0 disables it (camera image untouched).
+    # Only applies in scan mode; the camera view is never tinted otherwise.
+    scrim_opacity: float = 0.15
 
     def to_qml(self) -> Dict[str, Any]:
         """Return a plain dict suitable for a QVariantMap bridge property."""
@@ -158,6 +162,7 @@ class HudPanelConfig:
             'zoomMaxM': float(self.zoom_max_m),
             'scanSeconds': float(self.scan_seconds),
             'redrawHz': float(self.redraw_hz),
+            'scrimOpacity': float(self.scrim_opacity),
         }
 
 
@@ -286,6 +291,7 @@ def default_hud_layout() -> HudLayoutConfig:
             zoom_max_m=40.0,
             scan_seconds=15.0,
             redraw_hz=12.0,
+            scrim_opacity=0.15,
         ),
     )
 
@@ -373,6 +379,9 @@ def _merge_panel(base: HudPanelConfig, raw: Any, name: str) -> HudPanelConfig:
             raw.get('scan_seconds'), base.scan_seconds)),
         redraw_hz=max(1e-3, _as_float(
             raw.get('redraw_hz'), base.redraw_hz)),
+        # Clamp to a valid opacity: 0 disables the scrim, >1 would be meaningless.
+        scrim_opacity=min(1.0, max(0.0, _as_float(
+            raw.get('scrim_opacity'), base.scrim_opacity))),
     )
 
 

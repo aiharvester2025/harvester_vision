@@ -155,9 +155,11 @@ class HudConfigDefaultsTest(unittest.TestCase):
     def test_lidar_scan_to_qml_extras(self):
         panel = default_hud_layout().to_qml()['lidar_scan']
         for key in ('guideFontPx', 'estimateFontPx', 'zoomDefaultM',
-                    'zoomMinM', 'zoomMaxM', 'scanSeconds', 'redrawHz'):
+                    'zoomMinM', 'zoomMaxM', 'scanSeconds', 'redrawHz',
+                    'scrimOpacity'):
             self.assertIn(key, panel)
         self.assertAlmostEqual(panel['zoomDefaultM'], 12.0)
+        self.assertAlmostEqual(panel['scrimOpacity'], 0.15)
 
 
 class HudConfigOverrideTest(unittest.TestCase):
@@ -286,6 +288,20 @@ class HudConfigOverrideTest(unittest.TestCase):
         self.assertEqual(panel.rows['tree_height'], 'Height')
         # Unmentioned default rows survive the merge.
         self.assertIn('boom_angle', panel.rows)
+
+    def test_lidar_scan_scrim_opacity_is_configurable(self):
+        # The scan-mode scrim is a normal panel setting: an admin can tune it or
+        # disable it (0) without editing QML.
+        path = self._write({'lidar_scan': {'scrim_opacity': 0.0}})
+        self.assertAlmostEqual(load_hud_config(path).lidar_scan.scrim_opacity, 0.0)
+
+    def test_lidar_scan_scrim_opacity_is_clamped(self):
+        # Out-of-range values must not produce an invalid opacity.
+        for raw, expected in ((-0.5, 0.0), (2.0, 1.0)):
+            with self.subTest(raw=raw):
+                path = self._write({'lidar_scan': {'scrim_opacity': raw}})
+                self.assertAlmostEqual(
+                    load_hud_config(path).lidar_scan.scrim_opacity, expected)
 
     def test_malformed_json_is_fatal(self):
         handle = tempfile.NamedTemporaryFile(

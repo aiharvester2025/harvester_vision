@@ -64,11 +64,14 @@ Item {
     // Light scrim: enough to lift the point cloud off a bright camera image
     // while keeping the image readable for aiming.  Deliberately subtle (the
     // range-coloured points are already high contrast) so the camera image the
-    // operator aims with is not dimmed away.
+    // operator aims with is not dimmed away.  Admin-tunable via
+    // hud_config.json lidar_scan.scrim_opacity (0 disables it); this is the
+    // ONLY scrim and it exists only while the overlay is visible.
     Rectangle {
         anchors.fill: parent
         color: "#05080c"
-        opacity: 0.15
+        opacity: layout ? layout.scrimOpacity : 0.15
+        visible: opacity > 0
     }
 
     Canvas {

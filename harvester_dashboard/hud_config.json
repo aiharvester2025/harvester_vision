@@ -112,6 +112,7 @@
     "zoom_max_m": 40.0,
     "scan_seconds": 15.0,
     "redraw_hz": 12.0,
+    "scrim_opacity": 0.15,
     "rows": {
       "tree_height": "Tree Height",
       "trunk_top": "Trunk Top",
