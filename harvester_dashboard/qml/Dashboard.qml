@@ -86,10 +86,13 @@ Item {
                 Layout.preferredWidth: modelData.action === "pointcloud" ? 64 : 96
                 Layout.fillHeight: true
                 radius: 6
+                // Stable id for GUI tests to locate each toolbar button.
+                objectName: "toolbar_" + modelData.action
                 color: touch.pressed ? "#3a4a5a" : "#22303f"
                 border.color: {
                     if (modelData.action === "cutter") return bridge.view === "cutter" ? "#4fc3f7" : "#2a3a4a";
                     if (modelData.action === "boomdock") return (bridge.operatorHudsVisible && bridge.view !== "cutter") ? "#4fc3f7" : "#2a3a4a";
+                    if (modelData.action === "lidar") return bridge.lidarVisible ? "#4fc3f7" : "#2a3a4a";
                     if (modelData.action === "pointcloud") return bridge.pointcloudVisible ? "#4fc3f7" : "#2a3a4a";
                     if (modelData.action === "imu") return bridge.imuEnabled ? "#4fc3f7" : "#2a3a4a";
                     if (modelData.action === "lidarview") return "#2a3a4a";
@@ -132,38 +135,47 @@ Item {
         }
     }
 
-    // Main camera area with annotation overlay.
+    // Main camera area with annotation overlay.  The camera stays full-frame;
+    // the LiDAR scan overlay paints over it (so the cloud can be centred on the
+    // camera image), rather than shrinking the camera into a side column.
     CameraView {
         id: camera_view
         anchors.top: toolbar.bottom
         anchors.bottom: parent.bottom
         anchors.left: parent.left
-        anchors.right: bridge.lidarVisible ? lidar_inset.left : parent.right
-        anchors.margins: 6
-    }
-
-    // LiDAR inset (right column, togglable with 4).
-    LidarInset {
-        id: lidar_inset
-        visible: bridge.lidarVisible
-        anchors.top: toolbar.bottom
-        anchors.bottom: parent.bottom
         anchors.right: parent.right
-        width: 300
         anchors.margins: 6
     }
 
-    // HUD overlay on top of the camera view.
+    // Full-screen LiDAR scan overlay (key 4 toggles it; hidden by default).
+    // Created BEFORE HudOverlay so the safety panels always paint on top of the
+    // cloud: this is a background layer, not a replacement for the HUD.
+    LidarScanOverlay {
+        id: lidar_scan_overlay
+        visible: bridge.lidarVisible
+        anchors.fill: camera_view
+        display_x: camera_view.display_x
+        display_y: camera_view.display_y
+        display_w: camera_view.display_w
+        display_h: camera_view.display_h
+    }
+
+    // HUD overlay on top of the camera view.  Hidden while the full-screen
+    // LiDAR scan overlay is up so the scan view is not cluttered; the safety
+    // panels return as soon as the overlay is hidden (key 4).
     HudOverlay {
         id: hud
-        visible: bridge.hudVisible
+        visible: bridge.hudVisible && !bridge.lidarScanActive
         anchors.fill: camera_view
     }
 
     // Camera point-cloud inset (top-right of the camera view, togglable with 6).
+    // Also hidden in LiDAR scan mode (it is the depth-cloud view, unrelated to
+    // the LiDAR scan).
     PointCloudInset {
         id: pointcloud_inset
         visible: bridge.pointcloudVisible && bridge.pointcloudCount > 0
+                 && !bridge.lidarScanActive
         anchors.top: camera_view.top
         anchors.right: camera_view.right
         anchors.margins: 6

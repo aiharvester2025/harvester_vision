@@ -67,6 +67,8 @@ if _QT_AVAILABLE:
         pointcloud_changed = Signal()
         imu_active_changed = Signal()
         imu_enabled_changed = Signal()
+        lidar_imu_changed = Signal()
+        scan_changed = Signal()
         frame_tick = Signal()
 
         STATUS_TIMEOUT_MS = 600
@@ -76,12 +78,20 @@ if _QT_AVAILABLE:
                      hud_config: Optional[HudLayoutConfig] = None,
                      safety_config: Optional[SafetyConfig] = None,
                      cutter_config: Optional[CutterConfig] = None,
-                     parent=None):
+                     lidar_control=None, parent=None):
             super().__init__(parent)
             self.config = config
             self.model = model
             self.annotation = annotation
             self.annotation_publisher = annotation_publisher
+            # Opt-in LiDAR standby/normal control for the operator scan.  When
+            # absent (the default) it is created only if the config supplies an
+            # endpoint, so a direct construction without one stays render-only.
+            if lidar_control is None and config.lidar_control_enabled:
+                from .lidar_control import LidarControlPublisher
+                lidar_control = LidarControlPublisher(
+                    config.lidar_control_endpoint)
+            self.lidar_control = lidar_control
             self.hud_config = hud_config or default_hud_layout()
             # Docking safety-guidance thresholds.  None falls back to the
             # shipped tuning file, then to the built-in defaults (the loader
@@ -118,6 +128,14 @@ if _QT_AVAILABLE:
             # The LiDAR inset is hidden at startup (key 4 toggles it).
             self._lidar_visible = False
             self._lidar_view_index = 0
+            # Scan window precedence: an explicit --lidar-scan-seconds wins, else
+            # the admin's hud_config lidar_scan.scan_seconds, else 15 s.
+            config_seconds = getattr(config, 'lidar_scan_seconds', None)
+            if config_seconds is not None:
+                self._scan_seconds = float(config_seconds)
+            else:
+                self._scan_seconds = float(getattr(
+                    self.hud_config.lidar_scan, 'scan_seconds', 15.0))
             self._pointcloud_visible = False
             self._imu_enabled = True
             self._imu_reference = {'cutter': None, 'docking': None}
@@ -135,6 +153,30 @@ if _QT_AVAILABLE:
             self._last_status_response: Optional[Dict[str, Any]] = None
             self._maintenance_mode = 'unknown'
             self._lidar_points: List[List[float]] = []
+            # Raw (unstabilized) LiDAR cloud, cached so an IMU update only
+            # re-applies the cheap rotation rather than re-decoding the points.
+            self._lidar_raw_points: List[List[float]] = []
+            # MID-360 IMU attitude (sensor frame) and its latched reference, kept
+            # separate from the camera IMU state so the two never mix.
+            self._lidar_imu_attitude: Optional[tuple] = None
+            self._lidar_imu_reference: Optional[tuple] = None
+            # LiDAR scan state machine.  ``idle`` until the operator presses
+            # SCAN; ``scanning`` -> ``complete``/``no_data``.
+            self._scan_phase = 'idle'
+            self._scan_started_at: Optional[float] = None
+            self._scan_tree = None
+            self._scan_target = None
+            self._scan_reason = ''
+            # Cached estimate rows, rebuilt only when a scan completes (QML
+            # indexes this list per row, so it must not be rebuilt per read).
+            self._scan_estimate_rows_cache: List[dict] = []
+            # Points accumulated across the scan window.  The estimate is taken
+            # from this buffer, not the latest frame, so a long window actually
+            # densifies the measurement instead of only showing the last frame.
+            self._scan_accumulated: List[List[float]] = []
+            # Display state of the last scan_changed emit, so the periodic tick
+            # can skip redundant emissions.
+            self._last_scan_notify = None
             # Docking safety-guidance state.
             # (receipt_monotonic_s, distance_m) samples for the least-squares
             # closing-speed slope; pruned to _SPEED_MAX_SAMPLE_AGE_S.
@@ -272,9 +314,25 @@ if _QT_AVAILABLE:
         @Slot()
         def toggle_lidar(self) -> None:
             self._lidar_visible = not self._lidar_visible
+            if not self._lidar_visible and self._scan_phase == 'scanning':
+                # Leaving the overlay while scanning stops the scan rather than
+                # leaving the LiDAR running with nothing on screen: keep the
+                # data and estimate, and stand the sensor down.
+                self.stop_scan()
             self.lidar_visible_changed.emit()
 
         def _get_lidar_visible(self) -> bool:
+            return self._lidar_visible
+
+        def _get_lidar_scan_active(self) -> bool:
+            """True while the full-screen LiDAR scan overlay is showing.
+
+            The overlay is the only surface the operator needs during a tree
+            scan, so the unrelated HUD layers (operator sensor panels, the
+            trunk/calibration column, the camera point-cloud inset) hide while
+            it is up.  Derived from the one ``lidarVisible`` flag so the rule
+            cannot drift between the QML sites that consume it.
+            """
             return self._lidar_visible
 
         @Slot()
@@ -299,8 +357,9 @@ if _QT_AVAILABLE:
         # =================================================================
         # LiDAR view cycling — render-only, cycles on key 5.
         # =================================================================
-        # Ordered projection modes: top-down, front, left, right, isometric.
-        _LIDAR_VIEWS = ('top', 'front', 'left', 'right', 'iso')
+        # Ordered projection modes: top-down, front, left, right, isometric,
+        # then the camera-optical overlay view (full-screen scan overlay).
+        _LIDAR_VIEWS = ('top', 'front', 'left', 'right', 'iso', 'camera')
 
         @Slot()
         def cycle_lidar_view(self) -> None:
@@ -318,6 +377,7 @@ if _QT_AVAILABLE:
                 'left': 'left (y-z)',
                 'right': 'right (y-z)',
                 'iso': 'isometric',
+                'camera': 'camera overlay',
             }.get(self._LIDAR_VIEWS[self._lidar_view_index], '')
 
         # =================================================================
@@ -354,6 +414,8 @@ if _QT_AVAILABLE:
             """
             if channel.endswith('/imu'):
                 self._on_imu(channel, decoded)
+            elif channel == 'v1/imu/lidar':
+                self._on_lidar_imu(decoded)
 
         def _on_imu(self, channel: str, decoded) -> None:
             """Record the latest IMU attitude and refresh the active cloud."""
@@ -399,7 +461,47 @@ if _QT_AVAILABLE:
                 self._invalidate_pointcloud_cache()
                 self.pointcloud_changed.emit()
 
-        _LIDAR_HUD_SIZE_M = 8.0  # mirror of LidarInset.qml range_limit_m
+        def _on_lidar_imu(self, decoded) -> None:
+            """Record the MID-360 IMU attitude and refresh the LiDAR cloud.
+
+            Mirrors :meth:`_on_imu` for the camera but on **separate** state, so
+            the two IMUs never mix.  The sensor-frame roll/pitch is converted to
+            the optical convention ``imustab`` expects (see
+            ``decoders/livox_imu.py``) before it is stored, and a bad sample is
+            treated as "no attitude" rather than rotating the cloud by garbage.
+            """
+            if not isinstance(decoded, dict):
+                return
+            from .decoders.livox_imu import sensor_rpy_to_optical
+            attitude = sensor_rpy_to_optical(decoded.get('attitude_rpy_rad'))
+            if attitude is None:
+                return
+            previous = self._lidar_imu_attitude
+            if previous is not None:
+                # Only refresh when the attitude actually moved; re-stabilizing a
+                # quiescent 2000-point cloud every IMU sample is wasted work.
+                delta = abs(attitude[0] - previous[0]) + abs(attitude[1] - previous[1])
+                if delta < self._IMU_ATTITUDE_EPSILON:
+                    return
+            self._lidar_imu_attitude = attitude
+            # Latch the reference on first sample so stabilization removes
+            # vibration *relative to* the current (possibly tilted) pose.
+            if self._lidar_imu_reference is None:
+                self._lidar_imu_reference = attitude
+            self.lidar_imu_changed.emit()
+            self._apply_lidar_stabilization()
+
+        _LIDAR_HUD_SIZE_M = 8.0  # mirror of the overlay's default range window
+
+        # Upper bound on the accumulated scan buffer (points).  A 15 s window at
+        # ~5 frames/s * 2000 capped points is ~150k; 400k leaves headroom while
+        # keeping the estimate and its sort/percentile work bounded.
+        _SCAN_ACCUM_MAX_POINTS = 400000
+
+        # Grace period (s) after SCAN before a missing cloud counts as NO DATA.
+        # The MID-360 needs time to spin up and stream after being enabled, so
+        # without this a scan would abort on the first 200 ms tick.
+        _SCAN_CLOUD_GRACE_S = 5.0
 
         # Minimum attitude change (rad, summed |droll|+|dpitch|) that triggers
         # a point-cloud recompute.  IMU is published at ~5 Hz (matching depth).
@@ -412,9 +514,44 @@ if _QT_AVAILABLE:
                     points, self.config.lidar_max_points)
             except Exception:
                 limited = points
-            self._lidar_points = (
+            self._lidar_raw_points = (
                 limited.tolist() if limited is not None else [])
+            # Accumulate across the scan window so the estimate uses the whole
+            # scan, not just the last frame.  Capped so a 15 s window on a
+            # fast stream cannot grow without bound.
+            if self._scan_phase == 'scanning' and self._lidar_raw_points:
+                self._scan_accumulated.extend(self._lidar_raw_points)
+                if len(self._scan_accumulated) > self._SCAN_ACCUM_MAX_POINTS:
+                    del self._scan_accumulated[:-self._SCAN_ACCUM_MAX_POINTS]
+            self._apply_lidar_stabilization()
+
+        def _apply_lidar_stabilization(self) -> None:
+            """Re-derive the displayed LiDAR cloud from the cached raw points.
+
+            Applies the same IMU vibration compensation the camera cloud uses
+            (key 7 toggles both) so the scan is not smeared by machine
+            vibration.  With stabilization off, or no IMU attitude yet, the raw
+            (producer-leveled) cloud is shown unchanged.
+            """
+            raw = self._lidar_raw_points
+            attitude = self._lidar_imu_attitude
+            reference = self._lidar_imu_reference
+            if (self._imu_enabled and raw and attitude is not None
+                    and reference is not None):
+                try:
+                    from .decoders.imustab import stabilize_points
+                    stabilized = stabilize_points(
+                        np.asarray(raw, dtype=np.float32), attitude, reference)
+                    self._lidar_points = stabilized.tolist()
+                except Exception:
+                    self._lidar_points = list(raw)
+            else:
+                self._lidar_points = list(raw)
             self.lidar_points_changed.emit()
+            # Note: no scan_changed emit here.  This runs per point frame while
+            # scanning; the estimate rows only change when a scan completes, and
+            # the periodic tick already drives the countdown, so emitting here
+            # would re-evaluate every scan-bound QML property for no change.
 
         @Slot(float, float, float, str, result='QVariantList')
         def project_lidar_point(self, x: float, y: float, z: float,
@@ -423,7 +560,7 @@ if _QT_AVAILABLE:
 
             Returns ``[screen_x, screen_y]`` with the HUD origin (0, 0)
             in the top-left corner, matching the Canvas draw coordinate
-            system used by ``LidarInset.qml``.  The caller supplies ``cx``,
+            system used by the LiDAR scan overlay.  The caller supplies ``cx``,
             ``cy``, and ``scale`` so the projection can be reused at any
             HUD size.
             """
@@ -644,6 +781,8 @@ if _QT_AVAILABLE:
             self._recompute_safety_guidance()
             self._update_cutter_speed()
             self._recompute_cutter_guidance()
+            # Advance the operator LiDAR scan (render-only state machine).
+            self.advance_scan()
             self.source_badge_changed.emit()
             self.ranges_changed.emit()
             self.trunk_changed.emit()
@@ -1590,6 +1729,327 @@ if _QT_AVAILABLE:
         def _get_lidar_points(self):
             return self._lidar_points
 
+        # =====================================================================
+        # LiDAR scan state machine (render-only; never writes a socket).
+        # =====================================================================
+        # The operator drives the scan by hand on the Orin; there is no
+        # simulation.  The HUD shows guided instructions while scanning and
+        # swaps to the estimate rows when the scan completes.  Everything here
+        # is advisory: the estimate is geometry, not a measured contact, and the
+        # five measured range sensors remain the authoritative docking guard.
+        _SCAN_GUIDE_GUARDING = (
+            'Aim the camera at the trunk. Keep the crown and the trunk end in '
+            'view, then hold the machine steady.')
+
+        def _scan_changed_emit(self) -> None:
+            # Record the display state that this emit reflects, so the periodic
+            # tick can skip a redundant emit when nothing visible changed.
+            self._last_scan_notify = self._scan_display_key()
+            self.scan_changed.emit()
+
+        def _scan_display_key(self):
+            """A key of everything ``scan_changed``-bound QML can render.
+
+            The countdown is quantised to 0.1 s so the periodic 200 ms tick
+            still animates it, while a sub-0.1 s elapsed change never fires a
+            redundant repaint.
+            """
+            return (
+                self._scan_phase,
+                len(self._scan_estimate_rows_cache),
+                round(self._get_scan_countdown_s(), 1),
+                round(self._get_scan_progress(), 3),
+            )
+
+        def _scan_notify_if_changed(self) -> None:
+            key = self._scan_display_key()
+            if key == getattr(self, '_last_scan_notify', None):
+                return
+            self._last_scan_notify = key
+            self.scan_changed.emit()
+
+        def _lidar_set_enabled(self, enabled: bool) -> None:
+            """Ask the LiDAR producer for standby (False) or normal (True).
+
+            No-op when no control endpoint is configured (the dashboard stays
+            render-only), so this is the single guarded place the scan writes a
+            socket.  It only ever sends ``{"enabled": bool}``.
+            """
+            publisher = getattr(self, 'lidar_control', None)
+            if publisher is None:
+                return
+            try:
+                publisher.set_enabled(enabled)
+            except Exception:
+                # A control failure must never break the HUD: the scan simply
+                # reports no_data if the sensor does not start.
+                pass
+
+        @Slot()
+        def begin_scan(self) -> None:
+            """Start a fresh guided scan.
+
+            Puts the LiDAR into normal mode (standby -> scanning), zeroes the
+            timer, clears the accumulated buffer, and enters ``scanning``.  The
+            estimate runs when the operator presses STOP or the window times out
+            (see :meth:`advance_scan`).  Pressing SCAN again restarts the window
+            from zero.
+            """
+            if not self._lidar_visible:
+                # A scan can only be guided over a visible overlay.
+                self._lidar_visible = True
+                self.lidar_visible_changed.emit()
+            self._scan_phase = 'scanning'
+            self._scan_started_at = time.monotonic()
+            self._scan_tree = None
+            self._scan_target = None
+            self._scan_reason = ''
+            self._scan_estimate_rows_cache = []
+            self._scan_accumulated = []
+            self._lidar_set_enabled(True)
+            self._scan_changed_emit()
+
+        @Slot()
+        def stop_scan(self) -> None:
+            """End the scan early: stop the LiDAR, keep the data, estimate now.
+
+            Used by the STOP button and by the operator leaving the overlay
+            while a scan is running.  Returns the LiDAR to standby.
+            """
+            if self._scan_phase != 'scanning':
+                return
+            self._lidar_set_enabled(False)
+            self._evaluate_scan()
+
+        @Slot()
+        def cancel_scan(self) -> None:
+            """Discard the scan and return the LiDAR to standby.
+
+            Clears the timer and the accumulated buffer without estimating, so
+            the operator can start a fresh scan.
+            """
+            self._scan_phase = 'idle'
+            self._scan_started_at = None
+            self._scan_tree = None
+            self._scan_target = None
+            self._scan_reason = ''
+            self._scan_estimate_rows_cache = []
+            self._scan_accumulated = []
+            self._lidar_set_enabled(False)
+            self._scan_changed_emit()
+
+        def _scan_elapsed_s(self) -> float:
+            if self._scan_started_at is None:
+                return 0.0
+            return max(0.0, time.monotonic() - self._scan_started_at)
+
+        def _scan_has_cloud(self) -> bool:
+            """True when the LiDAR stream is delivering a usable cloud.
+
+            A cloud that is absent/stale/empty is NO DATA, never a completed
+            scan: showing an estimate computed from nothing would be a
+            reassuring-looking lie (the same rule the docking guidance uses).
+            """
+            if not self._lidar_points:
+                return False
+            state = self.model.state('v1/lidar/raw')
+            return not state.is_stale(
+                time.monotonic(), self.config.stale_after_s)
+
+        def advance_scan(self) -> None:
+            """Advance the scan state machine; called from ``refresh``.
+
+            While ``scanning`` this only drives the countdown display.  The scan
+            ends either when the operator presses STOP (:meth:`stop_scan`) or
+            when ``scan_seconds`` elapses: both return the LiDAR to standby,
+            keep the accumulated data, and run the estimate.  A stream that never
+            produces a usable cloud is ``no_data``, never a completed scan.
+            """
+            if self._scan_phase != 'scanning':
+                return
+            if not self._scan_has_cloud():
+                # Give the LiDAR time to spin up and stream: a sensor just
+                # enabled by SCAN takes seconds to produce its first cloud, so a
+                # one-tick check would abort the scan immediately.  Only after
+                # the grace period is a missing cloud a real NO DATA.
+                if self._scan_elapsed_s() < self._SCAN_CLOUD_GRACE_S:
+                    self._scan_notify_if_changed()
+                    return
+                # No usable stream: do not pretend to progress, and stand the
+                # LiDAR down so a dead/absent sensor is not left enabled.
+                self._lidar_set_enabled(False)
+                self._scan_phase = 'no_data'
+                self._scan_reason = 'no LiDAR cloud (disabled or out of range)'
+                self._scan_changed_emit()
+                return
+            elapsed = self._scan_elapsed_s()
+            if elapsed < self._scan_seconds:
+                self._scan_notify_if_changed()
+                return
+            # Window elapsed: stand the LiDAR down, then estimate from the
+            # accumulated cloud (same path as an early STOP).
+            self._lidar_set_enabled(False)
+            self._evaluate_scan()
+
+        def _evaluate_scan(self) -> None:
+            """Compute the tree/boom estimate and complete (or fail) the scan.
+
+            Estimates from the **accumulated** cloud (the whole scan window),
+            falling back to the latest frame only if nothing accumulated — so a
+            long window genuinely densifies the measurement.
+            """
+            from .model.scan_estimate import ScanEstimateConfig, plan_scan
+            cfg = ScanEstimateConfig(
+                docking_offset_below_top_m=float(getattr(
+                    self.config, 'docking_offset_below_top_m', 2.0)),
+                default_horizontal_distance_m=self._trunk_horizontal_distance_m(),
+            )
+            cloud = self._scan_accumulated or self._lidar_points
+            try:
+                tree, target = plan_scan(
+                    cloud,
+                    horizontal_distance_m=cfg.default_horizontal_distance_m,
+                    frame='sensor', cfg=cfg)
+            except Exception as error:  # pragma: no cover - defensive
+                self._scan_phase = 'no_data'
+                self._scan_reason = 'estimate failed: {}'.format(error)
+                self._scan_tree = None
+                self._scan_target = None
+                self._scan_changed_emit()
+                return
+            self._scan_tree = tree
+            self._scan_target = target
+            if tree.valid:
+                self._scan_phase = 'complete'
+                self._scan_reason = ''
+            else:
+                self._scan_phase = 'no_data'
+                self._scan_reason = tree.reason
+            # Build the estimate rows once, here, and cache them: the QML card
+            # indexes this list per row per repaint, so rebuilding per read was
+            # a repeated allocation on the UI thread.
+            rows = list(tree.to_rows())
+            if target is not None:
+                rows.extend(target.to_rows())
+            self._scan_estimate_rows_cache = rows
+            self._scan_changed_emit()
+
+        def _trunk_horizontal_distance_m(self) -> Optional[float]:
+            """Best-effort trunk horizontal distance from the trunk estimate.
+
+            Uses the ``v1/docking/trunk_estimate`` pose when present (the same
+            source the trunk line reads), else ``None`` so the boom IK reports
+            NO DATA for the distance rather than inventing one.
+            """
+            trunk = self.model.snapshot_trunk()
+            if not isinstance(trunk, dict):
+                return None
+            position = ((trunk.get('pose') or {}).get('position') or {})
+            try:
+                x = float(position.get('x'))
+                y = float(position.get('y'))
+            except (TypeError, ValueError, OverflowError):
+                return None
+            distance = math.hypot(x, y)
+            return distance if math.isfinite(distance) and distance > 0.0 else None
+
+        def _get_scan_phase(self) -> str:
+            return self._scan_phase
+
+        def _get_lidar_control_enabled(self) -> bool:
+            """True when the HUD can put the LiDAR into normal/standby mode.
+
+            False means the dashboard is render-only (no ``--lidar-control``):
+            the scan still runs and estimates from whatever cloud arrives, but
+            the SCAN/STOP/CANCEL buttons do not change the sensor state.
+            """
+            publisher = getattr(self, 'lidar_control', None)
+            return bool(publisher is not None and publisher.enabled)
+
+        def _get_scan_progress(self) -> float:
+            if self._scan_phase == 'complete':
+                return 1.0
+            if self._scan_phase in ('idle', 'no_data'):
+                return 0.0
+            if self._scan_seconds <= 0.0:
+                return 1.0
+            return min(1.0, max(0.0, self._scan_elapsed_s() / self._scan_seconds))
+
+        def _get_scan_countdown_s(self) -> float:
+            if self._scan_phase in ('idle', 'no_data', 'complete'):
+                return 0.0
+            return max(0.0, self._scan_seconds - self._scan_elapsed_s())
+
+        def _get_scan_guide_text(self) -> str:
+            if self._scan_phase == 'idle':
+                return ('Press SCAN to start a fresh scan. LiDAR is in standby. '
+                        + self._SCAN_GUIDE_GUARDING)
+            if self._scan_phase == 'scanning':
+                return ('SCANNING… {:.1f} s left — press STOP when the cloud '
+                        'looks dense enough.'
+                        .format(self._get_scan_countdown_s()))
+            if self._scan_phase == 'no_data':
+                return 'NO USABLE GEOMETRY — {}'.format(
+                    self._scan_reason or 'check the LiDAR and aim at the trunk')
+            return 'SCAN COMPLETE — LiDAR returned to standby. Press SCAN to rescan.'
+
+        def _get_scan_quality_text(self) -> str:
+            # Live while scanning (so the operator can judge when to press
+            # STOP), and the final accumulated total once complete.
+            if self._scan_phase == 'scanning':
+                count = len(self._scan_accumulated)
+                if count < 5000:
+                    density = 'sparse'
+                elif count < 40000:
+                    density = 'filling'
+                else:
+                    density = 'dense — good to STOP'
+                return '{} pts accumulated ({})'.format(count, density)
+            count = len(self._scan_accumulated) or len(self._lidar_points)
+            imu = 'imu on' if self._lidar_imu_active() else 'imu —'
+            return '{} pts  •  {}  •  view {}'.format(
+                count, imu, self._get_lidar_view_label())
+
+        def _get_scan_estimate_rows(self):
+            """Estimate rows for the completed scan (tree + boom targets).
+
+            Hidden while scanning: only ``complete`` yields rows, so the scan
+            instructions and the estimate values never render together.  The
+            list is built once in :meth:`_evaluate_scan` and cached: QML reads
+            this property once per row *per repaint* (the ``Repeater`` delegate
+            indexes ``bridge.scanEstimateRows``), so rebuilding it on every read
+            was a per-frame allocation spike.
+            """
+            if self._scan_phase != 'complete' or self._scan_tree is None:
+                return []
+            return self._scan_estimate_rows_cache
+
+        def _get_scan_status_text(self) -> str:
+            """One-line advisory status for the estimate card."""
+            if self._scan_phase != 'complete':
+                return ''
+            if self._scan_target is None:
+                return 'ADVISORY ONLY — verify before moving'
+            return ('ADVISORY ONLY — {} — verify before moving'
+                    .format(self._scan_target.status))
+
+        # -- LiDAR IMU -------------------------------------------------------
+        def _lidar_imu_active(self) -> bool:
+            return self._lidar_imu_attitude is not None
+
+        def _get_lidar_imu_active(self) -> bool:
+            return self._lidar_imu_active()
+
+        def _get_lidar_imu_attitude_line(self) -> str:
+            attitude = self._lidar_imu_attitude
+            if attitude is None:
+                return 'lidar imu: —'
+            roll_deg = math.degrees(attitude[0])
+            pitch_deg = math.degrees(attitude[1])
+            state = 'stab on' if self._imu_enabled else 'stab off'
+            return 'lidar imu: roll {:+.1f}° pitch {:+.1f}° ({})'.format(
+                roll_deg, pitch_deg, state)
+
         # -- status REP ------------------------------------------------------------
         def poll_status(self) -> None:
             if self.status_client is None:
@@ -1658,6 +2118,11 @@ if _QT_AVAILABLE:
             bool, _get_diagnostic_visible, notify=diagnostic_visible_changed)
         lidarVisible = Property(
             bool, _get_lidar_visible, notify=lidar_visible_changed)
+        # True while the full-screen LiDAR scan overlay is showing.  When it is,
+        # the unrelated HUD layers hide so the cloud reads cleanly; this is a
+        # single derived flag so the rule has one definition to test.
+        lidarScanActive = Property(
+            bool, _get_lidar_scan_active, notify=lidar_visible_changed)
         sourceBadge = Property(
             str, _get_source_badge, notify=source_badge_changed)
         sourceMixed = Property(
@@ -1737,6 +2202,26 @@ if _QT_AVAILABLE:
             str, _get_lidar_view, notify=lidar_view_changed)
         lidarViewLabel = Property(
             str, _get_lidar_view_label, notify=lidar_view_changed)
+        lidarImuActive = Property(
+            bool, _get_lidar_imu_active, notify=lidar_imu_changed)
+        lidarImuAttitudeLine = Property(
+            str, _get_lidar_imu_attitude_line, notify=lidar_imu_changed)
+        scanPhase = Property(
+            str, _get_scan_phase, notify=scan_changed)
+        lidarControlEnabled = Property(
+            bool, _get_lidar_control_enabled, notify=lidar_visible_changed)
+        scanProgress = Property(
+            float, _get_scan_progress, notify=scan_changed)
+        scanCountdownS = Property(
+            float, _get_scan_countdown_s, notify=scan_changed)
+        scanGuideText = Property(
+            str, _get_scan_guide_text, notify=scan_changed)
+        scanQualityText = Property(
+            str, _get_scan_quality_text, notify=scan_changed)
+        scanEstimateRows = Property(
+            'QVariantList', _get_scan_estimate_rows, notify=scan_changed)
+        scanStatusText = Property(
+            str, _get_scan_status_text, notify=scan_changed)
         statusLine = Property(
             str, _get_status_line, notify=status_summary_changed)
         maintenanceAvailable = Property(

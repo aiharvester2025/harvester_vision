@@ -35,6 +35,18 @@ class DashboardConfig:
     # Optional path to the cutter safety-guidance tuning file (mirrors
     # ``safety_config_path``; None falls back to the module path, then defaults).
     cutter_config_path: Optional[str] = None
+    # Docking point offset below the trunk top (m), used by the LiDAR scan
+    # estimate.  Deployment decision: 2.0 m below the trunk top.
+    docking_offset_below_top_m: float = 2.0
+    # LiDAR standby/normal control endpoint for the operator scan (the producer's
+    # PULL socket).  Empty disables it: the dashboard stays fully render-only.
+    # This is the one opt-in exception to the render-only rule; see
+    # ``lidar_control.py``.
+    lidar_control_endpoint: str = ''
+    # Guided scan window (s) before the estimate auto-completes.  None means
+    # "use hud_config.json lidar_scan.scan_seconds" (default 15 s); an explicit
+    # --lidar-scan-seconds always overrides it.
+    lidar_scan_seconds: Optional[float] = None
 
     @property
     def status_enabled(self) -> bool:
@@ -43,6 +55,10 @@ class DashboardConfig:
     @property
     def annotation_enabled(self) -> bool:
         return bool(self.annotation_endpoint)
+
+    @property
+    def lidar_control_enabled(self) -> bool:
+        return bool(self.lidar_control_endpoint)
 
     @classmethod
     def from_args(cls, args=None) -> 'DashboardConfig':
@@ -73,7 +89,21 @@ class DashboardConfig:
                             help='path to the docking safety-guidance tuning JSON file')
         parser.add_argument('--cutter-config', default=None,
                             help='path to the cutter safety-guidance tuning JSON file')
+        parser.add_argument('--docking-offset-below-top-m', type=float, default=2.0,
+                            help='docking point offset below the trunk top (m) for '
+                                 'the LiDAR scan estimate (default 2.0)')
+        parser.add_argument('--lidar-control', default='',
+                            help='optional LiDAR standby/normal control endpoint for '
+                                 'the scan HUD (the producer PULL socket, e.g. '
+                                 'tcp://127.0.0.1:5571); empty disables it (the '
+                                 'dashboard stays render-only)')
+        parser.add_argument('--lidar-scan-seconds', type=float, default=None,
+                            help='guided scan window (s) before the estimate '
+                                 'auto-completes; unset uses hud_config '
+                                 'lidar_scan.scan_seconds (default 15)')
         known, _unknown = parser.parse_known_args(args)
+        scan_seconds = (None if known.lidar_scan_seconds is None
+                        else max(1.0, known.lidar_scan_seconds))
         return cls(
             pub_endpoint=known.pub,
             status_endpoint=known.status,
@@ -88,4 +118,7 @@ class DashboardConfig:
             hud_config_path=(known.hud_config or None),
             safety_config_path=(known.safety_config or None),
             cutter_config_path=(known.cutter_config or None),
+            docking_offset_below_top_m=max(0.0, known.docking_offset_below_top_m),
+            lidar_control_endpoint=(known.lidar_control or ''),
+            lidar_scan_seconds=scan_seconds,
         )

@@ -25,6 +25,7 @@ CANONICAL_CHANNELS = frozenset({
     'v1/camera/docking/camera_info',
     'v1/camera/docking/imu',
     'v1/lidar/raw',
+    'v1/imu/lidar',
     'v1/range/docking',
     'v1/range/cutter',
     'v1/boom/state',
@@ -161,6 +162,8 @@ def validate_header(channel: str, header: Mapping[str, Any]) -> Dict[str, Any]:
     _require_nonnegative('gateway_monotonic_ns', result['gateway_monotonic_ns'])
 
     if channel.startswith('v1/camera/') and channel.endswith('/imu'):
+        _validate_imu_header(channel, result)
+    elif channel == 'v1/imu/lidar':
         _validate_imu_header(channel, result)
     elif channel.startswith('v1/camera/'):
         _validate_image_header(channel, result)

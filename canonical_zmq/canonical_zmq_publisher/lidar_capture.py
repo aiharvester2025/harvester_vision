@@ -40,6 +40,7 @@ Requires the depthai-env python (``zmq``, ``msgpack``) and, for
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
 import signal
@@ -56,6 +57,10 @@ from harvester_telemetry_contract import pack_message
 
 # Canonical channel for the LiDAR cloud (frozen by the contract).
 LIDAR_CHANNEL = 'v1/lidar/raw'
+# Canonical channel for the MID-360 IMU (gravity-referenced attitude), used by
+# the dashboard's point-cloud vibration compensation.  JSON payload, mirroring
+# the camera IMU channels.
+LIDAR_IMU_CHANNEL = 'v1/imu/lidar'
 
 # The canonical point layout: packed little-endian float32 x/y/z (12 bytes).
 POINT_FIELDS = [
@@ -112,6 +117,39 @@ def build_lidar_header(frame_id, point_count, acquisition_timestamp_ns,
         header['timestamp_source'] = timestamp_source
     return header
 
+
+def build_lidar_imu_header(frame_id, acquisition_timestamp_ns,
+                           source_mode='hardware', clock_domain='plc_rtc_utc',
+                           timestamp_source=None):
+    """Return a canonical header for a ``v1/imu/lidar`` packet.
+
+    The MID-360 IMU has no image geometry, so there is no ``width``/``height``
+    and the payload is JSON (``codec='json'``), exactly like the camera IMU
+    channels.  Labelling the clock honestly matters here for the same reason it
+    does for the cloud: an unsynchronized LiDAR has no UTC clock.
+    """
+    if source_mode not in ('hardware', 'simulation'):
+        raise ValueError('unsupported source_mode {!r}'.format(source_mode))
+    header = {
+        'schema_version': 1,
+        'source_mode': source_mode,
+        'source_id': 'orin',
+        'sequence': 0,  # owned by the aggregator
+        'frame_id': frame_id,
+        'acquisition_timestamp_ns': acquisition_timestamp_ns,
+        'clock_domain': clock_domain,
+        'gateway_monotonic_ns': 0,  # owned by the aggregator
+        'calibration_id': 'mid360_v0',
+        'capabilities': {
+            'lidar.imu': True,
+            'lidar.raw_xyz': True,
+            'target.world_fixed': False,
+        },
+        'codec': 'json',
+    }
+    if timestamp_source is not None:
+        header['timestamp_source'] = timestamp_source
+    return header
 
 
 def pack_points(points: Sequence[Sequence[float]]) -> bytes:
@@ -370,6 +408,43 @@ class LidarCapture:
             return
         self.push_socket.send_multipart(frames)
 
+    def emit_imu(self, sample) -> bool:
+        """Publish one ``v1/imu/lidar`` attitude packet; return True if sent.
+
+        ``sample`` is the dict from ``LivoxMid360Source.imu_sample()`` (or
+        ``None`` when no fresh attitude is available).  Synthetic mode has no
+        IMU, so this is a no-op there.  Bounded by the caller's scan rate: the
+        IMU is only published alongside an enabled cloud, matching the OAK
+        adapter's contract that a disabled stream stays silent.
+        """
+        if self.sdk_mode != 'livox-sdk' or not isinstance(sample, dict):
+            return False
+        payload = json.dumps({
+            'frame_id': sample.get('frame_id', self.frame_id),
+            'attitude_rpy_rad': sample.get('attitude_rpy_rad', [0.0, 0.0, 0.0]),
+            'quaternion_xyzw': sample.get('quaternion_xyzw', [0.0, 0.0, 0.0, 1.0]),
+            'accel_ms2': sample.get('accel_ms2', [0.0, 0.0, 0.0]),
+            'accel_norm_ms2': sample.get('accel_norm_ms2', 0.0),
+        }).encode('utf-8')
+        # One timing snapshot drives both the timestamp and its provenance, so
+        # the header can never say "PTP" over a host-clock value.
+        timing = self.timing_snapshot()
+        header = build_lidar_imu_header(
+            sample.get('frame_id', self.frame_id), timing['timestamp_ns'],
+            source_mode='hardware', clock_domain=timing['clock_domain'],
+            timestamp_source=timing['source'])
+        header['level_source'] = self.level_source
+        header['lidar_time_sync'] = bool(timing['synchronized'])
+        header['lidar_time_type'] = timing['time_type']
+        header['lidar_time_source'] = timing['lidar_source']
+        try:
+            frames = pack_message(LIDAR_IMU_CHANNEL, header, payload)
+        except Exception as error:  # pragma: no cover - defensive
+            print('[{}] rejected imu packet: {}'.format(
+                LIDAR_IMU_CHANNEL, error))
+            return False
+        self.push_socket.send_multipart(frames)
+        return True
 
     def run(self):
         period_s = 1.0 / self.hz
@@ -377,6 +452,8 @@ class LidarCapture:
             self.channel,
             self.push_socket.getsockopt(zmq.LAST_ENDPOINT),
             self.sdk_mode, self.sector_deg, self.max_points))
+        print('[{}] publishing MID-360 IMU attitude alongside the cloud'.format(
+            LIDAR_IMU_CHANNEL))
         print('[{}] State: {}'.format(
             self.channel, 'ENABLED' if self.enabled else 'DISABLED'))
         print('[{}] timing: acquisition time is the LiDAR PTP/GPS timestamp when '
@@ -392,6 +469,8 @@ class LidarCapture:
                 self.poll_control()
                 if self.enabled:
                     self.emit(self.acquire())
+                    if self._source is not None:
+                        self.emit_imu(self._source.imu_sample())
                 elif self._source is not None:
                     # Idle: discard any backlog without per-point conversion.
                     # (In livox-sdk mode the SDK is also stopped, so this is

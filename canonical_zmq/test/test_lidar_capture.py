@@ -5,10 +5,12 @@ import unittest
 
 from harvester_telemetry_contract import pack_message, unpack_message
 from canonical_zmq_publisher.lidar_capture import (
+    LIDAR_IMU_CHANNEL,
     POINT_FIELDS,
     POINT_STRIDE_BYTES,
     LidarCapture,
     build_lidar_header,
+    build_lidar_imu_header,
     downsample,
     pack_points,
     range_clip,
@@ -289,6 +291,47 @@ class TimingSnapshotTest(unittest.TestCase):
         self.assertEqual(snap['source'], 'host_arrival')
         self.assertFalse(snap['synchronized'])
         self.assertEqual(snap['lidar_source'], 'simulation')
+
+
+class LidarImuTest(unittest.TestCase):
+    def test_channel_name(self):
+        self.assertEqual(LIDAR_IMU_CHANNEL, 'v1/imu/lidar')
+
+    def test_imu_header_is_canonical_json(self):
+        header = build_lidar_imu_header('mid360_link', 123, source_mode='hardware',
+                                        clock_domain='lidar_ptp_utc',
+                                        timestamp_source='livox_ptp')
+        self.assertEqual(header['codec'], 'json')
+        self.assertEqual(header['frame_id'], 'mid360_link')
+        self.assertTrue(header['capabilities']['lidar.imu'])
+        # No image geometry on an IMU header.
+        self.assertNotIn('width', header)
+        self.assertNotIn('height', header)
+        header['sequence'] = 1
+        header['gateway_monotonic_ns'] = 0
+        payload = b'{"attitude_rpy_rad": [0.1, 0.2, 0.0]}'
+        channel, validated, decoded = unpack_message(
+            pack_message(LIDAR_IMU_CHANNEL, header, payload))
+        self.assertEqual(channel, LIDAR_IMU_CHANNEL)
+        self.assertEqual(decoded, payload)
+
+    def test_invalid_source_mode_is_rejected(self):
+        with self.assertRaises(ValueError):
+            build_lidar_imu_header('mid360_link', 1, source_mode='bogus')
+
+    def test_synthetic_mode_emits_no_imu(self):
+        capture = LidarCapture(sdk_mode='synthetic', disabled=False,
+                               ingest_endpoint='inproc://imu-synth',
+                               control_endpoint='inproc://imu-synth-ctl')
+        self.assertFalse(capture.emit_imu({'attitude_rpy_rad': [0, 0, 0]}))
+
+    def test_missing_sample_emits_no_imu(self):
+        capture = LidarCapture(sdk_mode='synthetic', disabled=False,
+                               ingest_endpoint='inproc://imu-none',
+                               control_endpoint='inproc://imu-none-ctl')
+        capture.sdk_mode = 'livox-sdk'
+        self.assertFalse(capture.emit_imu(None))
+        self.assertFalse(capture.emit_imu('not-a-dict'))
 
 
 if __name__ == '__main__':

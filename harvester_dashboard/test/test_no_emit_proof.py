@@ -239,6 +239,212 @@ class NoEmitProofTest(unittest.TestCase):
         publisher.close()
         subscriber.close(0)
 
+    def _scan_bridge(self):
+        from PySide2.QtGui import QGuiApplication
+        from harvester_dashboard.bridge import DashboardBridge
+        from harvester_dashboard.config import DashboardConfig
+        from harvester_dashboard.model.telemetry_model import TelemetryModel
+        from harvester_dashboard.model.target_model import AnnotationState
+
+        app = QGuiApplication.instance() or QGuiApplication(['scan-test'])
+        model = TelemetryModel()
+        config = DashboardConfig(
+            pub_endpoint='tcp://127.0.0.1:55901',
+            status_endpoint='',
+            annotation_endpoint='',
+        )
+        bridge = DashboardBridge(config, model, AnnotationState())
+        # main.py wires the JSON hook; mirror it so the IMU/scan paths run.
+        model.on_json = bridge.on_json_packet
+        return app, model, bridge
+
+    def test_scan_controls_emit_nothing(self):
+        """begin_scan/cancel_scan/cycle_lidar_view must not write any socket."""
+        try:
+            import PySide2  # noqa: F401
+        except ImportError:
+            self.skipTest('PySide2 unavailable')
+        app, _model, bridge = self._scan_bridge()
+        bridge.toggle_lidar()
+        bridge.begin_scan()
+        for _ in range(6):
+            bridge.cycle_lidar_view()
+            bridge.cancel_scan()
+            bridge.begin_scan()
+            bridge.refresh()
+            for _ in range(3):
+                app.processEvents()
+            try:
+                self.annotation_spy.recv_multipart(zmq.NOBLOCK)
+                self.fail('annotation socket received traffic during scan controls')
+            except zmq.Again:
+                pass
+        if bridge.lidarVisible:
+            bridge.toggle_lidar()
+
+    def test_scan_phase_transitions(self):
+        try:
+            import PySide2  # noqa: F401
+        except ImportError:
+            self.skipTest('PySide2 unavailable')
+        app, model, bridge = self._scan_bridge()
+        self.assertEqual(bridge.scanPhase, 'idle')
+        bridge.begin_scan()
+        self.assertEqual(bridge.scanPhase, 'scanning')
+        # Just after SCAN the LiDAR is still spinning up, so a missing cloud is
+        # inside the grace period: the scan must NOT abort on the first tick.
+        bridge.advance_scan()
+        self.assertEqual(bridge.scanPhase, 'scanning')
+        # Past the grace period with still no cloud -> NO DATA, LiDAR stood down.
+        bridge._scan_started_at = (
+            time.monotonic() - bridge._SCAN_CLOUD_GRACE_S - 1.0)
+        bridge.advance_scan()
+        self.assertEqual(bridge.scanPhase, 'no_data')
+        self.assertEqual(bridge.scanEstimateRows, [])
+        # Feed a cloud, rescan, and let the window elapse -> complete.
+        import numpy as np
+        rng = np.random.default_rng(0)
+        trunk_z = rng.uniform(1.0, 12.0, size=1500)
+        trunk = np.stack([rng.normal(0, 0.1, 1500), rng.normal(0, 0.1, 1500),
+                          trunk_z], axis=1)
+        theta = rng.uniform(0, 6.28, 1500)
+        r = rng.uniform(0.5, 3.0, 1500)
+        canopy = np.stack([r * np.cos(theta), r * np.sin(theta),
+                           rng.uniform(9.2, 11.7, 1500)], axis=1)
+        cloud = np.vstack([trunk, canopy]).astype('<f4')
+        # Begin the scan FIRST, then feed frames: accumulation only happens
+        # while scanning, which is the live order.
+        bridge.begin_scan()
+        from helpers import lidar_packet
+        model.ingest_frames(lidar_packet(cloud))
+        bridge.on_frame_decoded('v1/lidar/raw', cloud)
+        # Accumulation happened as frames arrived while scanning.
+        self.assertGreater(len(bridge._scan_accumulated), 0)
+        # Force the scan window to have elapsed without sleeping.
+        bridge._scan_started_at = time.monotonic() - bridge._scan_seconds - 1.0
+        bridge.advance_scan()
+        self.assertEqual(bridge.scanPhase, 'complete')
+        self.assertTrue(bridge.scanEstimateRows)
+        keys = [r['key'] for r in bridge.scanEstimateRows]
+        self.assertIn('tree_height', keys)
+        self.assertIn('boom_angle', keys)
+        self.assertIn('status', keys)
+        # Cancel returns to idle and clears the rows.
+        bridge.cancel_scan()
+        self.assertEqual(bridge.scanPhase, 'idle')
+        self.assertEqual(bridge.scanEstimateRows, [])
+
+    def test_stop_scan_ends_early_and_estimates(self):
+        """STOP ends the window early, keeps the data, and estimates."""
+        try:
+            import PySide2  # noqa: F401
+        except ImportError:
+            self.skipTest('PySide2 unavailable')
+        app, model, bridge = self._scan_bridge()
+        import numpy as np
+        from helpers import lidar_packet
+        rng = np.random.default_rng(1)
+        trunk_z = rng.uniform(1.0, 12.0, size=1200)
+        trunk = np.stack([rng.normal(0, 0.1, 1200), rng.normal(0, 0.1, 1200),
+                          trunk_z], axis=1)
+        theta = rng.uniform(0, 6.28, 1200)
+        r = rng.uniform(0.5, 3.0, 1200)
+        canopy = np.stack([r * np.cos(theta), r * np.sin(theta),
+                           rng.uniform(9.2, 11.7, 1200)], axis=1)
+        cloud = np.vstack([trunk, canopy]).astype('<f4')
+        model.ingest_frames(lidar_packet(cloud))
+        bridge.on_frame_decoded('v1/lidar/raw', cloud)
+        bridge.begin_scan()
+        # Well before the window elapses.
+        bridge._scan_started_at = time.monotonic()
+        bridge.stop_scan()
+        self.assertEqual(bridge.scanPhase, 'complete')
+        self.assertTrue(bridge.scanEstimateRows)
+
+    def test_control_publisher_emits_enabled_only(self):
+        """SCAN -> enabled true; STOP/CANCEL -> enabled false; nothing else."""
+        try:
+            import PySide2  # noqa: F401
+        except ImportError:
+            self.skipTest('PySide2 unavailable')
+        from harvester_dashboard.lidar_control import LidarControlPublisher
+
+        sent = []
+
+        class SpyPublisher(LidarControlPublisher):
+            def __init__(self):
+                self.endpoint = 'spy'
+                self.socket = object()
+                self.sent = 0
+                self.errors = 0
+                self.last_error = ''
+                self._last_value = None
+
+            def set_enabled(self, enabled):
+                sent.append(bool(enabled))
+                self._last_value = bool(enabled)
+                return True
+
+        app, model, bridge = self._scan_bridge()
+        spy = SpyPublisher()
+        bridge.lidar_control = spy
+        self.assertTrue(bridge.lidarControlEnabled)
+        bridge.toggle_lidar()
+        bridge.begin_scan()
+        bridge.cancel_scan()
+        bridge.begin_scan()
+        bridge.stop_scan()
+        self.assertEqual(sent, [True, False, True, False])
+        # Only the three actions write, and only booleans.
+        self.assertTrue(all(isinstance(v, bool) for v in sent))
+
+    def test_control_disabled_by_default(self):
+        try:
+            import PySide2  # noqa: F401
+        except ImportError:
+            self.skipTest('PySide2 unavailable')
+        _app, _model, bridge = self._scan_bridge()
+        # No --lidar-control: render-only, and the scan still works.
+        self.assertFalse(bridge.lidarControlEnabled)
+        self.assertIsNone(getattr(bridge, 'lidar_control', None))
+
+    def test_lidar_scan_active_hides_unrelated_hud(self):
+        """liadarScanActive tracks the overlay flag so the other HUD hides."""
+        try:
+            import PySide2  # noqa: F401
+        except ImportError:
+            self.skipTest('PySide2 unavailable')
+        app, _model, bridge = self._scan_bridge()
+        self.assertFalse(bridge.lidarVisible)
+        self.assertFalse(bridge.lidarScanActive)
+        bridge.toggle_lidar()
+        app.processEvents()
+        self.assertTrue(bridge.lidarVisible)
+        self.assertTrue(bridge.lidarScanActive)
+        bridge.toggle_lidar()
+        app.processEvents()
+        self.assertFalse(bridge.lidarScanActive)
+
+    def test_lidar_imu_reports_and_stabilizes(self):
+        try:
+            import PySide2  # noqa: F401
+        except ImportError:
+            self.skipTest('PySide2 unavailable')
+        app, model, bridge = self._scan_bridge()
+        from helpers import imu_packet
+        import numpy as np
+        points = np.array([[1.0, 0.5, 2.0], [2.0, 0.0, 3.0]], dtype='<f4')
+        bridge.on_frame_decoded('v1/lidar/raw', points)
+        app.processEvents()
+        self.assertFalse(bridge.lidarImuActive)
+        model.ingest_frames(imu_packet(
+            'v1/imu/lidar', attitude=[0.1, 0.05, 0.0]))
+        app.processEvents()
+        self.assertTrue(bridge.lidarImuActive)
+        self.assertIn('lidar imu', bridge.lidarImuAttitudeLine)
+        # The stabilized cloud still has the same point count and distances.
+        self.assertEqual(len(bridge.lidarPoints), 2)
+
 
 if __name__ == '__main__':
     unittest.main()

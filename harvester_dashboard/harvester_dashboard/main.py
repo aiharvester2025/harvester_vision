@@ -60,6 +60,12 @@ def main(argv=None) -> int:
     annotation = AnnotationState()
     from .annotation_publisher import AnnotationPublisher
     annotation_publisher = AnnotationPublisher(config.annotation_endpoint)
+    # Opt-in LiDAR standby/normal control for the operator scan (the one
+    # exception to the render-only rule).  Disabled unless --lidar-control was
+    # supplied, so an existing deploy is unchanged.
+    from .lidar_control import LidarControlPublisher
+    lidar_control = (LidarControlPublisher(config.lidar_control_endpoint)
+                     if config.lidar_control_enabled else None)
     # Safety tuning: an explicit --safety-config path, else the shipped file,
     # else the built-in defaults (the loader never raises).
     safety_path = config.safety_config_path or default_config_path()
@@ -69,6 +75,7 @@ def main(argv=None) -> int:
                    or cutter_safety_guidance.default_config_path())
     bridge = DashboardBridge(config, model, annotation,
                              annotation_publisher=annotation_publisher,
+                             lidar_control=lidar_control,
                              hud_config=load_hud_config(config.hud_config_path),
                              safety_config=SafetyConfig.load(safety_path),
                              cutter_config=CutterConfig.load(cutter_path))
@@ -122,6 +129,11 @@ def main(argv=None) -> int:
     if bridge.status_client is not None:
         bridge.status_client.close()
     annotation_publisher.close()
+    if lidar_control is not None:
+        # Return the LiDAR to standby on exit rather than leaving the motor
+        # running with nothing on screen.
+        lidar_control.set_enabled(False)
+        lidar_control.close()
     return code
 
 

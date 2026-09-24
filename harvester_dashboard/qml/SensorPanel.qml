@@ -245,7 +245,7 @@ Item {
     Loader {
         id: docking_loader
         active: bridge.operatorHudsVisible && bridge.hudLayout.docking.visible
-                && bridge.view !== "cutter"
+                && bridge.view !== "cutter" && !bridge.lidarScanActive
         sourceComponent: SensorHudPanel {
             layout: bridge.hudLayout.docking
             rows: root.dockingRows
@@ -263,7 +263,7 @@ Item {
     Loader {
         id: boom_loader
         active: bridge.operatorHudsVisible && bridge.hudLayout.boom.visible
-                && bridge.view !== "cutter"
+                && bridge.view !== "cutter" && !bridge.lidarScanActive
         sourceComponent: SensorHudPanel {
             layout: bridge.hudLayout.boom
             rows: bridge.boomRows
@@ -281,6 +281,7 @@ Item {
         id: cutter_loader
         active: bridge.view === "cutter" && bridge.cutterHudVisible
                 && bridge.hudLayout.cutter_range.visible
+                && !bridge.lidarScanActive
         sourceComponent: SensorHudPanel {
             layout: bridge.hudLayout.cutter_range
             rows: bridge.cutterRangeRow
@@ -304,6 +305,7 @@ Item {
         id: cutter_guidance_loader
         active: bridge.view === "cutter" && bridge.cutterHudVisible
                 && bridge.hudLayout.cutter_guidance.visible
+                && !bridge.lidarScanActive
         sourceComponent: CutterGuidanceHud {
             layout: bridge.hudLayout.cutter_guidance
             bridgeRef: bridge
@@ -323,7 +325,7 @@ Item {
         id: dock_guidance_loader
         active: bridge.operatorHudsVisible
                 && bridge.hudLayout.dock_guidance.visible
-                && bridge.view !== "cutter"
+                && bridge.view !== "cutter" && !bridge.lidarScanActive
         sourceComponent: DockGuidanceHud {
             layout: bridge.hudLayout.dock_guidance
             bridgeRef: bridge

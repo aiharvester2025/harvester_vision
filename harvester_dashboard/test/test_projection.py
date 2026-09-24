@@ -6,6 +6,7 @@ from harvester_dashboard.projection import (
     AXIS_LABELS,
     VIEW_LABELS,
     VIEWS,
+    project_camera,
     project_points,
 )
 
@@ -20,7 +21,8 @@ class ProjectionTest(unittest.TestCase):
         self.aft_right_down = [-1.0, -2.0, -0.5]
 
     def test_view_cycle_order(self):
-        self.assertEqual(VIEWS, ('top', 'front', 'left', 'right', 'iso'))
+        self.assertEqual(
+            VIEWS, ('top', 'front', 'left', 'right', 'iso', 'camera'))
         self.assertEqual(len(VIEW_LABELS), len(VIEWS))
         self.assertEqual(len(AXIS_LABELS), len(VIEWS))
 
@@ -103,6 +105,51 @@ class ProjectionTest(unittest.TestCase):
         # A typo in the HUD should not crash; the worst case is iso.
         out = project_points([self.fwd_left_up], 'isometric', 0, 0, 1)
         self.assertEqual(len(out), 1)
+
+
+class CameraProjectionTest(unittest.TestCase):
+    """The camera-optical overlay projection (identity extrinsic)."""
+
+    def setUp(self):
+        self.cx, self.cy, self.scale = 100.0, 100.0, 10.0
+
+    def test_identity_extrinsic_maps_axes(self):
+        # Optical +X -> screen right, +Y (down) -> screen down, +Z (depth) does
+        # not move the point in an orthographic overlay.
+        out = project_camera([[1.0, 2.0, 3.0]], self.cx, self.cy, self.scale)
+        sx, sy, rng = out[0]
+        self.assertEqual(sx, self.cx + 1.0 * self.scale)
+        self.assertEqual(sy, self.cy + 2.0 * self.scale)
+        self.assertAlmostEqual(rng, (1.0 + 4.0 + 9.0) ** 0.5)
+
+    def test_translation_offsets_the_point(self):
+        # Translation is the LiDAR origin in the camera frame; subtracting it
+        # expresses the point relative to the camera.
+        out = project_camera([[1.0, 2.0, 3.0]], self.cx, self.cy, self.scale,
+                             translation=[1.0, 1.0, 0.0])
+        sx, sy, _r = out[0]
+        self.assertEqual(sx, self.cx + 0.0)
+        self.assertEqual(sy, self.cy + 1.0 * self.scale)
+
+    def test_rotation_is_applied(self):
+        # A 90-degree rotation about Z swaps X and Y (row-major 3x3).
+        rot = [0.0, -1.0, 0.0,
+               1.0, 0.0, 0.0,
+               0.0, 0.0, 1.0]
+        out = project_camera([[1.0, 0.0, 0.0]], self.cx, self.cy, self.scale,
+                             rotation=rot)
+        sx, sy, _r = out[0]
+        self.assertAlmostEqual(sx, self.cx)                     # x' = 0
+        self.assertAlmostEqual(sy, self.cy + 1.0 * self.scale)  # y' = 1
+
+    def test_empty_and_none(self):
+        self.assertEqual(project_camera([], 0, 0, 1), [])
+        self.assertEqual(project_camera(None, 0, 0, 1), [])
+
+    def test_camera_view_is_in_the_cycle(self):
+        self.assertIn('camera', VIEWS)
+        self.assertIn('camera', VIEW_LABELS)
+        self.assertIn('camera', AXIS_LABELS)
 
 
 if __name__ == '__main__':

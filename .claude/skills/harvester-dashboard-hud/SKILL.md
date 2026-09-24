@@ -48,7 +48,21 @@ QML**, and it is strictly **render-only** (no socket writes from view/toggle con
     `cutter_safety_guidance.py`).
   - `CameraView.qml` — camera image (image://frames), stale ring + timestamp line
     (diagnostic-gated), click annotation, crosshair.
-  - `LidarInset.qml`, `PointCloudInset.qml`, `Annotation.qml` — inset overlays.
+  - `LidarScanOverlay.qml` — **full-screen** LiDAR scan overlay: draws the cloud
+    over the camera image (centred on the camera's displayed image rect), shows
+    guided scan instructions while scanning, then swaps to the estimate rows on
+    completion. Toggled by key `4` (hidden by default). Created BEFORE
+    `HudOverlay` in `Dashboard.qml`, so the safety panels always paint on top —
+    the overlay is a background layer, not a replacement for the HUD.
+
+    **Exclusive scan mode.** While the overlay is up, `bridge.lidarScanActive`
+    (= `lidarVisible`) hides the unrelated HUD: `Dashboard.qml` hides
+    `HudOverlay` + `PointCloudInset`, and every `SensorPanel.qml` Loader's
+    `active` adds `&& !bridge.lidarScanActive`. Gating the *Loader active* (not
+    just `visible`) matters — a hidden Loader stays loaded and its panel keeps
+    rendering; deactivating frees it. This is the "exclusive view" rule, so keep
+    the new loader's `active` condition in sync when adding one.
+  - `PointCloudInset.qml`, `Annotation.qml` — inset overlays.
 
 ## Two-layer HUD (operator vs. diagnostics)
 
@@ -169,9 +183,60 @@ Buffering **every** digit would add an 800 ms delay to all primary controls — 
 
 Full key map (render-only unless noted): `1` cutter view / toggle Cutter Range
 HUD, `2` toggle Boom+Docking HUDs (on cutter: back to docking + show them), `3`
-operator HUD, `4` LiDAR inset, `5` LiDAR view cycle, `6` point cloud, `7` IMU
-stabilization A/B, `0`/`Esc` clear annotation, `777`+`Enter` diagnostic layer,
-click = annotate (depth + camera-frame XYZ).
+operator HUD, `4` LiDAR scan overlay (full-screen, hidden by default), `5` LiDAR
+view cycle (now includes the `camera` overlay view), `6` point cloud, `7` IMU
+stabilization A/B (covers **both** the OAK cloud and the MID-360 cloud), `0`/`Esc`
+clear annotation, `777`+`Enter` diagnostic layer, click = annotate (depth +
+camera-frame XYZ). The overlay also has on-screen SCAN/STOP/CANCEL/VIEW/ZOOM
+buttons. Toolbar buttons show the `#4fc3f7` blue outline while their layer is
+active (LiDAR button keys on `bridge.lidarVisible`).
+
+## Operator LiDAR scan HUD (`lidar_scan`)
+
+The full-screen overlay is driven by a **state machine** in `bridge.py`:
+`scanPhase ∈ {idle, scanning, complete, no_data}`. The operator presses SCAN
+(`bridge.begin_scan()`), which puts the LiDAR into normal mode, zeroes the timer,
+clears the accumulated buffer, and enters `scanning`; `refresh()` (200 ms)
+advances it via `bridge.advance_scan()`. The scan ends when:
+
+- the operator presses **STOP** (`bridge.stop_scan()`) — ends early, keeps data; or
+- `scan_seconds` (default **15 s**, admin-overridable) elapses.
+
+Both paths return the LiDAR to **standby**, keep the accumulated cloud, and run
+the estimate once. **CANCEL** (`bridge.cancel_scan()`) discards the data, zeroes
+the timer, and stands the LiDAR down without estimating. Only `complete` renders
+`scanEstimateRows` — the instructions and the estimates never render together. A
+missing/empty/stale cloud is `no_data`, never a confident-looking `complete` (the
+same "never a false green" rule the docking guidance uses).
+
+- **Accumulated buffer.** Points are accumulated across the window
+  (`_scan_accumulated`, capped at `_SCAN_ACCUM_MAX_POINTS`), and the estimate runs
+  on the accumulation — not the latest frame — so a long window genuinely
+  densifies the measurement. `scanQualityText` shows a live point count +
+  sparse/filling/dense hint so the operator can judge when to press STOP.
+- **LiDAR control is the ONE render-only exception.** `lidar_control.py` PUSHes
+  only `{"enabled": bool}` to the producer's PULL endpoint, is **disabled by
+  default** (`--lidar-control`, off ⇒ dashboard stays render-only), and is wired
+  in `main.py` (also sends `enabled: false` on exit). `bridge.lidarControlEnabled`
+  tells the QML whether the buttons actually control the sensor; when false the
+  overlay says so on screen. It never touches the boom/platform/PLC — the LiDAR
+  is a sensor, not an actuator.
+- Estimator: `model/scan_estimate.py` (Qt-free, numpy) — encoder-free trunk axis
+  + tight-cylinder trunk top, `H_dock = H − offset`, and the closed-form boom IK
+  with the **as-built** ros2_ws corrections (`leveling = +theta_b`,
+  `BOOM_PIVOT_WORLD_Z = 1.81 m`).
+- Layout/config: the `lidar_scan` panel in the same `--hud-config` file as the
+  other sensor HUDs (anchor/caption/size/fonts + `zoom_default_m`, `scan_seconds`,
+  `redraw_hz`, `guide_font_px`, `estimate_font_px`).
+- MID-360 IMU: `v1/imu/lidar` (JSON) is routed to `bridge._on_lidar_imu`, which
+  converts the sensor-frame attitude in `decoders/livox_imu.py` and applies the
+  **same** `decoders/imustab.stabilize_points` the OAK cloud uses. Key `7` toggles
+  stabilization for both clouds; the LiDAR reference is latched separately so the
+  two IMUs never mix.
+- ADVISORY ONLY: the estimate is geometry from one scan, not a measured contact.
+  The overlay must always show the advisory line; the five measured range sensors
+  remain the authoritative docking guard. The camera↔LiDAR extrinsic is
+  unsurveyed, so the camera overlay is an aid, not a calibrated measurement.
 
 ## Surface a new JSON channel (worked example: `v1/boom/state`)
 
@@ -218,6 +283,9 @@ NOT "fix" them.
 ## Guardrails
 
 - Never add a bridge slot that writes to a socket; view switching and HUD toggles are render-only.
+  The **one** exception is the LiDAR standby/normal control (`lidar_control.py`), which is opt-in,
+  disabled by default, sends only `{"enabled": bool}`, and is reachable from exactly three slots
+  (`begin_scan`/`stop_scan`/`cancel_scan`). Any new socket write needs the same explicit scoping.
 - When removing a QML binding, remove the now-unused bridge getter + `Property` too (avoid dead
   code), but leave valid `TelemetryModel` APIs and their tests in place if reusable.
 - `telemetry_model` must stay Qt-free; keep all Qt types (`Signal`, `Property`, `Slot`, `QTimer`,

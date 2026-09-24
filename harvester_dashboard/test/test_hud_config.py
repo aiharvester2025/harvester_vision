@@ -26,6 +26,7 @@ def _layout_with(boom_visible: bool, docking_visible: bool,
         dock_guidance=panel(base.dock_guidance, base.dock_guidance.visible),
         cutter_guidance=panel(
             base.cutter_guidance, base.cutter_guidance.visible),
+        lidar_scan=panel(base.lidar_scan, base.lidar_scan.visible),
     )
 
 
@@ -51,6 +52,16 @@ class HudConfigDefaultsTest(unittest.TestCase):
         self.assertEqual(load_hud_config(None).cutter_guidance.caption,
                          load_hud_config(str(path)).cutter_guidance.caption)
 
+    def test_shipped_config_parses(self):
+        # Regression: the shipped file once began with design-note prose before
+        # the JSON object, which made the strict loader SystemExit at startup.
+        # It must parse cleanly and expose the scan panel.
+        path = default_hud_config_path()
+        self.assertTrue(path.exists(), path)
+        layout = load_hud_config(str(path))     # raises SystemExit if malformed
+        self.assertTrue(layout.lidar_scan.visible)
+        self.assertEqual(layout.lidar_scan.caption, 'LIDAR SCAN')
+
     def test_defaults_missing_file(self):
         layout = load_hud_config('/nonexistent/hud.json')
         self.assertEqual(layout.boom.anchor, 'bottom-right')
@@ -71,11 +82,13 @@ class HudConfigDefaultsTest(unittest.TestCase):
     def test_to_qml_shape(self):
         qml = default_hud_layout().to_qml()
         self.assertEqual(set(qml), {'boom', 'docking', 'cutter_range',
-                                    'dock_guidance', 'cutter_guidance'})
+                                    'dock_guidance', 'cutter_guidance',
+                                    'lidar_scan'})
         self.assertEqual(qml['boom']['valueFontPx'],
                          default_hud_layout().boom.value_font_px)
         self.assertEqual(qml['docking']['anchor'], 'bottom-left')
         self.assertIn('rows', qml['docking'])
+        self.assertEqual(qml['lidar_scan']['anchor'], 'bottom-center')
 
     def test_dock_guidance_defaults(self):
         layout = default_hud_layout()
@@ -123,6 +136,28 @@ class HudConfigDefaultsTest(unittest.TestCase):
             self.assertIn(key, panel)
         self.assertAlmostEqual(panel['stopbarRangeM'], 1.0)
         self.assertTrue(panel['showConfirmButton'])
+
+    def test_lidar_scan_defaults(self):
+        panel = default_hud_layout().lidar_scan
+        self.assertTrue(panel.visible)
+        self.assertEqual(panel.anchor, 'bottom-center')
+        self.assertEqual(panel.caption, 'LIDAR SCAN')
+        # Scan-overlay extras ship with usable defaults.
+        self.assertGreater(panel.zoom_default_m, panel.zoom_min_m)
+        self.assertLess(panel.zoom_default_m, panel.zoom_max_m)
+        # 15 s is the operator default scan window, admin-overridable.
+        self.assertAlmostEqual(panel.scan_seconds, 15.0)
+        self.assertGreater(panel.redraw_hz, 0.0)
+        # The estimate row captions are named.
+        self.assertEqual(panel.rows['tree_height'], 'Tree Height')
+        self.assertEqual(panel.rows['boom_angle'], 'Boom Angle')
+
+    def test_lidar_scan_to_qml_extras(self):
+        panel = default_hud_layout().to_qml()['lidar_scan']
+        for key in ('guideFontPx', 'estimateFontPx', 'zoomDefaultM',
+                    'zoomMinM', 'zoomMaxM', 'scanSeconds', 'redrawHz'):
+            self.assertIn(key, panel)
+        self.assertAlmostEqual(panel['zoomDefaultM'], 12.0)
 
 
 class HudConfigOverrideTest(unittest.TestCase):
@@ -231,6 +266,26 @@ class HudConfigOverrideTest(unittest.TestCase):
         layout = load_hud_config(path)
         self.assertEqual(layout.docking.anchor,
                          default_hud_layout().docking.anchor)
+
+    def test_lidar_scan_override(self):
+        path = self._write({
+            'lidar_scan': {
+                'anchor': 'top-right',
+                'caption': 'SCAN TREE',
+                'zoom_default_m': 20.0,
+                'scan_seconds': 8.0,
+                'rows': {'tree_height': 'Height'},
+            },
+        })
+        layout = load_hud_config(path)
+        panel = layout.lidar_scan
+        self.assertEqual(panel.anchor, 'top-right')
+        self.assertEqual(panel.caption, 'SCAN TREE')
+        self.assertAlmostEqual(panel.zoom_default_m, 20.0)
+        self.assertAlmostEqual(panel.scan_seconds, 8.0)
+        self.assertEqual(panel.rows['tree_height'], 'Height')
+        # Unmentioned default rows survive the merge.
+        self.assertIn('boom_angle', panel.rows)
 
     def test_malformed_json_is_fatal(self):
         handle = tempfile.NamedTemporaryFile(

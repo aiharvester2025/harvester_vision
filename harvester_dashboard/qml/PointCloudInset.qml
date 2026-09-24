@@ -3,7 +3,7 @@
 // forward through the lens).  Derived in the dashboard from the live depth +
 // RGB + camera_info streams; no new wire channel.
 //
-// Mirrors LidarInset.qml's Canvas/projection pattern, but with the camera
+// Mirrors LidarScanOverlay.qml's Canvas/projection pattern, but with the camera
 // optical-frame convention (the screen up-axis is -Y, since image Y grows
 // downward).
 import QtQuick 2.12

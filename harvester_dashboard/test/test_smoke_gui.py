@@ -154,11 +154,13 @@ class GuiSmokeTest(unittest.TestCase):
     def test_operator_hud_layout_and_rows(self):
         layout = self.bridge.hudLayout
         self.assertEqual(set(layout), {'boom', 'docking', 'cutter_range',
-                                       'dock_guidance', 'cutter_guidance'})
+                                       'dock_guidance', 'cutter_guidance',
+                                       'lidar_scan'})
         self.assertEqual(layout['boom']['anchor'], 'bottom-right')
         self.assertEqual(layout['docking']['anchor'], 'bottom-left')
         self.assertEqual(layout['dock_guidance']['anchor'], 'bottom-center')
         self.assertEqual(layout['cutter_guidance']['anchor'], 'bottom-center')
+        self.assertEqual(layout['lidar_scan']['anchor'], 'bottom-center')
         # Boom has the seven PLC MQTT sensor rows.
         keys = [row['key'] for row in self.bridge.boomRows]
         self.assertEqual(keys, [
@@ -198,9 +200,24 @@ class GuiSmokeTest(unittest.TestCase):
         self.assertEqual(by_key['center_line']['label'], 'Center')
         self.assertEqual(by_key['diagonal_left_45deg']['label'], '45° Left')
 
+    def test_lidar_toolbar_button_tracks_visibility_flag(self):
+        # The "4 LiDAR" button outlines on the blue selected colour while the
+        # scan overlay is up.  The toolbar delegates are not instantiated in an
+        # offscreen QQuickView, so this asserts the flag the QML binding keys on
+        # (the border expression itself is a one-line mirror of this).
+        if self.bridge.lidarVisible:
+            self.bridge.toggle_lidar()
+        self.app.processEvents()
+        self.assertFalse(self.bridge.lidarVisible)
+        self.bridge.toggle_lidar()
+        self.app.processEvents()
+        self.assertTrue(self.bridge.lidarVisible)
+        self.bridge.toggle_lidar()   # restore hidden
+        self.app.processEvents()
+
     def test_lidar_view_cycles_in_order(self):
-        # Key 5 cycles top -> front -> left -> right -> iso -> top ...
-        expected = ['top', 'front', 'left', 'right', 'iso', 'top']
+        # Key 5 cycles top -> front -> left -> right -> iso -> camera -> top ...
+        expected = ['top', 'front', 'left', 'right', 'iso', 'camera', 'top']
         self.assertEqual(self.bridge.lidarView, 'top')
         for step, name in enumerate(expected[1:], start=1):
             self.bridge.cycle_lidar_view()
@@ -211,7 +228,7 @@ class GuiSmokeTest(unittest.TestCase):
         self.bridge.cycle_lidar_view()
         self.assertEqual(self.bridge.lidarViewLabel, 'front (x-z)')
         # Reset to top for other tests.
-        for _ in range(4):
+        for _ in range(5):
             self.bridge.cycle_lidar_view()
         self.assertEqual(self.bridge.lidarView, 'top')
 
@@ -290,6 +307,7 @@ class HudPanelGatingTest(unittest.TestCase):
             cutter_range=HudPanelConfig(name='cutter_range', visible=True),
             dock_guidance=HudPanelConfig(name='dock_guidance', visible=True),
             cutter_guidance=HudPanelConfig(name='cutter_guidance', visible=True),
+            lidar_scan=HudPanelConfig(name='lidar_scan', visible=True),
         )
         cls.bridge = DashboardBridge(
             DashboardConfig(status_endpoint='', annotation_endpoint=''),
@@ -350,6 +368,26 @@ class HudPanelGatingTest(unittest.TestCase):
         self.assertFalse(self._loaders()[0].property('active'))
         # Restore.
         self.bridge._set_operator_huds_visible(True)
+        for _ in range(4):
+            self.app.processEvents()
+        self.assertTrue(self._loaders()[0].property('active'))
+
+    def test_lidar_scan_mode_hides_unrelated_hud(self):
+        # While the full-screen LiDAR scan overlay is up, the operator sensor
+        # panels must deactivate (the scan view is not cluttered by them).
+        from PySide2.QtCore import QObject
+        self.bridge.set_view('docking')
+        self.bridge._set_operator_huds_visible(True)
+        for _ in range(4):
+            self.app.processEvents()
+        self.assertTrue(self._loaders()[0].property('active'))
+        self.bridge.toggle_lidar()
+        for _ in range(4):
+            self.app.processEvents()
+        active = [l.property('active') for l in self._loaders()]
+        self.assertFalse(any(active),
+                         'operator HUD loaders must all deactivate in scan mode')
+        self.bridge.toggle_lidar()   # hide overlay
         for _ in range(4):
             self.app.processEvents()
         self.assertTrue(self._loaders()[0].property('active'))

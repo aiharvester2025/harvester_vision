@@ -412,8 +412,19 @@ CAMERAS=1 ./run_all.sh    # re-enable the two OAK adapters
 LIDAR_MODE=livox-sdk ./run_all.sh   # drive the real sensor
 ```
 
-The dashboard already decodes `v1/lidar/raw` through `LidarDecoder` and renders
-it in `LidarInset.qml`; no dashboard change is needed.
+The dashboard decodes `v1/lidar/raw` through `LidarDecoder` and renders it in
+the **full-screen operator LiDAR scan overlay** (`LidarScanOverlay.qml`, key `4`,
+hidden by default). The overlay draws the cloud over the live camera image and
+runs a guided scan: pressing SCAN shows aim/hold instructions, and when the scan
+completes it hides the instructions and shows the tree-height / boom-target
+estimates (`model/scan_estimate.py`, the Orin counterpart of the `ros2_ws`
+tree-scan math). The estimates are **advisory only** — the measured five-range
+docking safety remains the authoritative guard.
+
+The MID-360 IMU is republished on `v1/imu/lidar` and drives vibration
+compensation of the LiDAR cloud, using the same stabilization as the OAK depth
+cloud (key `7` toggles both). The dashboard is the Orin's viewer: `LivoxViewer2`
+is an x86_64 binary and cannot run on the aarch64 Orin.
 
 **PLC/Modbus bridge.** `plc_sensor_bridge.py` is a skeleton that will poll the
 PLC (boom angle, 2-axis tilt, five range sensors) and republish as MessagePack

@@ -494,5 +494,46 @@ class PpsSyncModeTests(unittest.TestCase):
         self.assertIsNone(bindings.set_pps_sync_mode(handle=1, mode=0))
 
 
+class ImuSampleTests(unittest.TestCase):
+    """The dashboard IMU attitude accessor (sensor frame, gravity-referenced)."""
+
+    def _source(self):
+        import threading
+        source = LivoxMid360Source.__new__(LivoxMid360Source)
+        source._lock = threading.Lock()
+        source.imu_valid_max_age_s = 1.0
+        source._latest_quaternion = (0.0, 0.0, 0.0, 1.0)
+        source._latest_quaternion_at = time.monotonic()
+        return source
+
+    def test_level_is_zero_tilt(self):
+        source = self._source()
+        source._latest_accel = (0.0, 0.0, 9.80665)   # +Z up at rest
+        sample = source.imu_sample()
+        self.assertAlmostEqual(sample['attitude_rpy_rad'][0], 0.0, places=6)
+        self.assertAlmostEqual(sample['attitude_rpy_rad'][1], 0.0, places=6)
+        self.assertEqual(sample['frame_id'], 'mid360_link')
+
+    def test_gravity_along_x_is_pitch(self):
+        source = self._source()
+        source._latest_accel = (4.9, 0.0, 8.5)
+        roll, pitch, _ = source.imu_sample()['attitude_rpy_rad']
+        self.assertNotAlmostEqual(pitch, 0.0, places=3)
+        self.assertAlmostEqual(roll, 0.0, places=6)
+
+    def test_gravity_along_y_is_roll(self):
+        source = self._source()
+        source._latest_accel = (0.0, 4.9, 8.5)
+        roll, pitch, _ = source.imu_sample()['attitude_rpy_rad']
+        self.assertNotAlmostEqual(roll, 0.0, places=3)
+        self.assertAlmostEqual(pitch, 0.0, places=6)
+
+    def test_stale_or_missing_returns_none(self):
+        source = self._source()
+        source._latest_accel = (0.0, 0.0, 9.80665)
+        source._latest_quaternion_at = 0.0   # never seen
+        self.assertIsNone(source.imu_sample())
+
+
 if __name__ == "__main__":
     unittest.main()

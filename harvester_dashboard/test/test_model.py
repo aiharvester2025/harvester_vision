@@ -129,6 +129,16 @@ class TelemetryModelTest(unittest.TestCase):
         _payload, valid = self.model.snapshot_calibration()
         self.assertTrue(valid)
 
+    def test_lidar_imu_channel_is_json(self):
+        # v1/imu/lidar is a JSON channel and its attitude is retained decoded.
+        from helpers import imu_packet
+        self.model.ingest_frames(imu_packet(
+            'v1/imu/lidar', attitude=[0.1, -0.2, 0.0], sequence=1))
+        state = self.model.state('v1/imu/lidar')
+        self.assertTrue(state.ever_seen)
+        self.assertIsInstance(state.last_json, dict)
+        self.assertEqual(state.last_json['attitude_rpy_rad'][0], 0.1)
+
 
 if __name__ == '__main__':
     unittest.main()

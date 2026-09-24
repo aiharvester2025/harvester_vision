@@ -84,11 +84,12 @@ DISPLAY=:1 PYTHONPATH=harvester_dashboard /usr/bin/python3 \
 
 Controls: `1` cutter view / toggle the Cutter Range HUD, `2` toggle the Boom +
 Docking HUDs (on the cutter view it returns to the docking camera and shows
-them), `3` operator sensor HUD, `4` LiDAR inset, `5` LiDAR projection, `6`
-camera point-cloud inset, `0`/`Esc` clear annotation, click to annotate (shows
-depth + camera-frame XYZ when the OAK depth stream is on). All actions are
-non-actuating annotations only. See `docs/oak_depth_pointcloud.md` for the
-depth/point-cloud feature.
+them), `3` operator sensor HUD, `4` full-screen LiDAR scan overlay, `5` LiDAR
+projection (now includes a `camera` overlay view), `6` camera point-cloud inset,
+`7` IMU stabilization A/B (covers both the OAK and MID-360 clouds), `0`/`Esc`
+clear annotation, click to annotate (shows depth + camera-frame XYZ when the OAK
+depth stream is on). All actions are non-actuating annotations only. See
+`docs/oak_depth_pointcloud.md` for the depth/point-cloud feature.
 
 ### HUD layers (operator vs. developer diagnostics)
 
@@ -126,6 +127,62 @@ The sensor HUD is split into two independently-toggled layers:
   `harvester/sensors/v1` topic mapped by `mqtt_ingest` onto `v1/boom/state`):
   boom angle, boom length, slew angle, platform tilt X1/Y1, and prime mover
   tilt X2/Y2.
+
+- **Operator LiDAR scan overlay** (key `4`, "4 LiDAR" button; hidden by default)
+  — a **full-screen** overlay that draws the MID-360 point cloud over the live
+  camera image, centred on the camera's displayed image rect so the trunk seen
+  through the camera is where the cloud draws. It is created *before*
+  `HudOverlay` in `Dashboard.qml`, so the safety panels always paint on top of
+  the cloud: the overlay is a background layer, not a replacement for the HUD.
+
+  The overlay runs an operator-driven scan state machine
+  (`scanPhase ∈ {idle, scanning, complete, no_data}`). On-screen
+  SCAN/STOP/CANCEL/VIEW/ZOOM buttons (and keys `4`/`5`) drive it:
+  - `idle` — "press SCAN" prompt, LiDAR in standby;
+  - **SCAN** — LiDAR standby → normal, timer zeroed, buffer cleared, `scanning`;
+  - **STOP** — end early, keep the accumulated data, estimate now;
+  - **CANCEL** — discard the scan, zero the timer, LiDAR → standby;
+  - timeout — 15 s `scan_seconds` (admin-overridable) behaves like STOP;
+  - `complete` — the scan instructions hide and the **estimate rows** appear:
+    tree height, trunk top, crown base, uncertainty, docking height, boom angle,
+    boom extension, platform level, boom distance, docking lower angle, status;
+  - `no_data` — no usable cloud; the estimate is never shown from bad geometry.
+
+  The estimate runs on the **accumulated** cloud over the whole window (capped),
+  not the last frame, and a live point count with a sparse/filling/dense hint
+  tells the operator when to press STOP. Both STOP and the timeout return the
+  LiDAR to standby so the motor does not idle between scans.
+
+  **LiDAR control is the one opt-in exception to the dashboard's render-only
+  rule** (`harvester_dashboard/lidar_control.py`). It is disabled unless
+  `--lidar-control <producer PULL endpoint>` is passed (off by default, so an
+  existing deploy is unchanged; `run_all.sh` passes it when `LIDAR=1`), PUSHes
+  only `{"enabled": bool}`, and is reachable from exactly the three scan buttons.
+  `bridge.lidarControlEnabled` lets the overlay state on screen when the buttons
+  do not control the sensor.
+
+  The estimate (`harvester_dashboard/model/scan_estimate.py`, Qt-free) is the
+  Orin counterpart of the `ros2_ws` tree-scan/boom-plan math, including the
+  as-built corrections (`leveling = +theta_b`, boom pivot `1.81 m`). It is
+  **advisory only** — geometry from one scan, not a measured contact; the five
+  measured range sensors remain the authoritative docking guard. The
+  camera↔LiDAR extrinsic is unsurveyed until the commissioning survey, so the
+  `camera` overlay view is an aid, not a calibrated measurement.
+
+  The overlay's MID-360 IMU compensation comes from the `v1/imu/lidar` channel
+  (JSON, published by `lidar_capture` alongside the cloud). `bridge._on_lidar_imu`
+  converts the sensor-frame attitude in `decoders/livox_imu.py` and applies the
+  same `decoders/imustab.stabilize_points` the OAK cloud uses; key `7` toggles
+  stabilization for both clouds. The overlay layout/config is the `lidar_scan`
+  panel in the same `--hud-config` file as the other sensor HUDs (see below).
+
+  **Exclusive scan mode.** While the overlay is visible, the unrelated HUD hides
+  so the scan view is uncluttered: the operator sensor panels (Boom, Docking
+  Ranges, Docking/Cutter Safety, Cutter Range), the trunk/calibration column, the
+  MIXED-SOURCES warning, and the camera point-cloud inset all hide; they return
+  the moment the overlay is hidden (key `4`). The estimate card carries its own
+  advisory line, and the measured five-range docking safety returns as soon as
+  scanning ends.
 
 - **Developer-diagnostic HUD** (key sequence **`7` `7` `7` then `Enter`**) — the
   health overlays useful only when debugging: the bottom per-channel stream
@@ -168,7 +225,19 @@ defaults and documents every accepted key:
   "docking": { "anchor": "bottom-left", "rows": { "center_line": "Center" } },
   "cutter_range": { "anchor": "bottom-left", "caption": "CUTTER RANGE" },
   "dock_guidance": { "anchor": "bottom-center", "caption": "DOCKING SAFETY" },
-  "cutter_guidance": { "anchor": "bottom-center", "caption": "CUTTER SAFETY" }
+  "cutter_guidance": { "anchor": "bottom-center", "caption": "CUTTER SAFETY" },
+  "lidar_scan": {
+    "anchor": "bottom-center",
+    "caption": "LIDAR SCAN",
+    "guide_font_px": 34,             // scan-instruction text size
+    "estimate_font_px": 34,          // estimate-row text size
+    "zoom_default_m": 12.0,          // overlay half-width of the projected cloud
+    "zoom_min_m": 3.0,
+    "zoom_max_m": 40.0,
+    "scan_seconds": 15.0,            // guided scan window (s)
+    "redraw_hz": 12.0,               // overlay repaint cap (CPU guard)
+    "rows": { "tree_height": "Tree Height", "boom_angle": "Boom Angle" }
+  }
 }
 ```
 
@@ -354,10 +423,31 @@ bind the canonical `5590` themselves.
   disables depth, `IMU=0` disables the IMU stream).
 - `lidar_capture` — **implemented**. Reads the MID-360 through Livox-SDK2
   (`lidar/livox_source.py`), levels to gravity, clips to a forward sector and
-  range, and PUSHes `v1/lidar/raw` (`lidar_xyz_f32`). Starts idle and is enabled
-  over a PULL control socket (`{"enabled": true}`). Launched by `run_all.sh`
-  (`LIDAR=1` default, `LIDAR_MODE=livox-sdk` for the real sensor). See
-  `.kilo/plans/mid360-lidar-integration.md`.
+  range, and PUSHes `v1/lidar/raw` (`lidar_xyz_f32`). Alongside the cloud it
+  publishes the MID-360 IMU attitude on `v1/imu/lidar` (`json`), which the
+  dashboard uses for point-cloud vibration compensation. Starts idle and is
+  enabled over a PULL control socket (`{"enabled": true}`) — the operator scan
+  HUD drives this to switch the MID-360 between normal and standby (see the
+  operator scan-overlay section above). Launched by
+  `run_all.sh` (`LIDAR=1` default, `LIDAR_MODE=livox-sdk` for the real sensor).
+  See `.kilo/plans/mid360-lidar-integration.md`.
+
+### MID-360 IMU provenance (`v1/imu/lidar`)
+
+`v1/imu/lidar` is a JSON channel mirroring the camera IMU channels
+(`v1/camera/<name>/imu`), carrying `attitude_rpy_rad` (gravity-referenced
+roll/pitch about the sensor's own axes), `quaternion_xyzw`, `accel_ms2` and
+`accel_norm_ms2` for the newest sample, with `frame_id: mid360_link`. It is
+published only while the LiDAR is enabled (same on-demand contract as the
+cloud), so a disabled sensor stays silent. Its timing header uses the same
+`timing_snapshot()` provenance as the cloud (see below), so an unsynchronized
+LiDAR is never labelled `lidar_ptp_utc`.
+
+The dashboard converts the sensor-frame attitude to its stabilization frame in
+`harvester_dashboard/decoders/livox_imu.py` and then applies the **same**
+`decoders/imustab.stabilize_points` the OAK cloud uses, so one stabilization
+implementation serves both sensors. The LiDAR IMU state is kept separate from
+the camera IMU state, so the two never mix.
 
 ### LiDAR timestamp provenance (`v1/lidar/raw`)
 

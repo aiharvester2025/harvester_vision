@@ -162,7 +162,17 @@ def main() -> int:
     check('no annotation created without depth', bridge.annotationActive is False)
 
     # 6. stale flag flips after silence
-    time.sleep(0.1)
+    # Re-feed the cutter RGB first: this check asserts the FRESH branch, and the
+    # frame fed at startup is now older than the 2 s stale window by the time
+    # this (grab-heavy) section runs, which would fail for a wall-clock reason
+    # unrelated to the staleness logic under test.
+    fresh_frames = jpeg_packet('v1/camera/cutter/rgb', width=64, height=48)
+    model.ingest_frames(fresh_frames)
+    _fc, fresh_header, fresh_payload = unpack_message(fresh_frames)
+    fresh_rgb = SocketDrainer.decode_frame(
+        'v1/camera/cutter/rgb', fresh_header, fresh_payload)
+    bridge.on_frame_decoded('v1/camera/cutter/rgb', fresh_rgb)
+    app.processEvents()
     check('camera fresh before silence', bridge.activeCameraStale is False)
     # force staleness by rewinding the receipt clock
     state = model.state('v1/camera/cutter/rgb')
@@ -173,22 +183,33 @@ def main() -> int:
     check('camera stale after 3 s silence', bridge.activeCameraStale is True)
     grab('stale')
 
-    # 7. key 5 cycles the LiDAR view top -> front -> left -> right -> iso
-    # Feed a synthetic LiDAR cloud so the inset repaints in each view.
+    # 7. key 4 toggles the full-screen LiDAR scan overlay; key 5 cycles the
+    # projection view top -> front -> left -> right -> iso -> camera -> top.
     import numpy as np
     cloud = np.array([[1.0, 0.0, 0.5], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0],
                       [0.0, -1.0, 0.0], [2.0, 2.0, 1.0], [0.0, 0.0, 0.5]],
                      dtype=np.float32)
+    key(Qt.Key_4)
+    check('key 4 shows the LiDAR scan overlay', bridge.lidarVisible is True)
+    check('scan mode hides unrelated HUD', bridge.lidarScanActive is True)
     bridge.on_frame_decoded('v1/lidar/raw', cloud)
     app.processEvents()
-    expected = ['top', 'front', 'left', 'right', 'iso', 'top']
+    expected = ['top', 'front', 'left', 'right', 'iso', 'camera', 'top']
     check('lidar view starts top', bridge.lidarView == 'top')
     for name in expected[1:]:
         key(Qt.Key_5)
         check('key 5 -> {}'.format(name), bridge.lidarView == name)
-    grab('lidar_iso')
-    key(Qt.Key_5)  # wrap back to top for any later steps
-    check('key 5 wraps to front', bridge.lidarView == 'front')
+    grab('lidar_camera_overlay')
+    # Pressing SCAN starts the guided state machine (render-only).
+    bridge.begin_scan()
+    app.processEvents()
+    check('SCAN starts scanning', bridge.scanPhase in ('scanning', 'no_data'))
+    bridge.cancel_scan()
+    check('CANCEL returns to idle', bridge.scanPhase == 'idle')
+    key(Qt.Key_4)  # hide the overlay again for any later steps
+    check('key 4 hides the LiDAR scan overlay', bridge.lidarVisible is False)
+    check('leaving scan mode restores unrelated HUD',
+          bridge.lidarScanActive is False)
 
     failures = [name for name, ok in results if not ok]
     print('\n{}/{} checks passed'.format(

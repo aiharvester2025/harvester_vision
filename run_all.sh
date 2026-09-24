@@ -102,6 +102,14 @@ MQTT_CMD=(env "PYTHONPATH=canonical_zmq:." "${DAI_PY}" -m canonical_zmq_publishe
 # process address space into hundreds of mmap'd arenas.  This is the dominant
 # contributor to the dashboard's ~3 GB steady-state RSS.
 DASH_CMD=(env "DISPLAY=${DISPLAY_TARGET}" MALLOC_ARENA_MAX=2 "PYTHONPATH=harvester_dashboard" "${SYS_PY}" -m harvester_dashboard.main --pub tcp://127.0.0.1:5590 --status tcp://127.0.0.1:5600)
+# Operator scan control: when the LiDAR producer is running, let the dashboard's
+# scan HUD put the MID-360 into normal/standby mode (the one opt-in exception to
+# the render-only rule).  LIDAR=0 keeps the dashboard fully render-only.
+LIDAR_SCAN_SECONDS="${LIDAR_SCAN_SECONDS:-15}"
+if [[ "${LIDAR}" == "1" ]]; then
+  DASH_CMD+=(--lidar-control "${LIDAR_CONTROL_ENDPOINT}"
+             --lidar-scan-seconds "${LIDAR_SCAN_SECONDS}")
+fi
 
 log() { printf '\033[1;32m[run_all]\033[0m %s\n' "$*"; }
 

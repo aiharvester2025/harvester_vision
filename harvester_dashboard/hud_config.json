@@ -94,5 +94,36 @@
       "ttc": "TTC",
       "max_speed": "Max Safe"
     }
+  },
+  "lidar_scan": {
+    "visible": true,
+    "anchor": "bottom-center",
+    "caption": "LIDAR SCAN",
+    "width": 820,
+    "height": 0,
+    "value_font_px": 46,
+    "caption_font_px": 30,
+    "margin_px": 16,
+    "opacity": 0.85,
+    "guide_font_px": 34,
+    "estimate_font_px": 34,
+    "zoom_default_m": 12.0,
+    "zoom_min_m": 3.0,
+    "zoom_max_m": 40.0,
+    "scan_seconds": 15.0,
+    "redraw_hz": 12.0,
+    "rows": {
+      "tree_height": "Tree Height",
+      "trunk_top": "Trunk Top",
+      "crown_base": "Crown Base",
+      "uncertainty": "Uncertainty",
+      "docking_height": "Docking Height",
+      "boom_angle": "Boom Angle",
+      "boom_extension": "Boom Extension",
+      "platform_level": "Platform Level",
+      "boom_distance": "Boom Distance",
+      "docking_lower": "Docking Lower Angle",
+      "status": "Status"
+    }
   }
 }

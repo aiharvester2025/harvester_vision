@@ -39,6 +39,7 @@ from __future__ import annotations
 import ctypes
 import itertools
 import json
+import math
 import os
 import struct
 import threading
@@ -795,6 +796,10 @@ class LivoxMid360Source:
         self._point_queue: deque = deque(maxlen=max_queued_points)
         self._latest_quaternion: Tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0)
         self._latest_quaternion_at: float = 0.0
+        # Newest raw accelerometer sample (m/s^2) in the sensor frame, so the
+        # publisher can expose the gravity-referenced tilt the dashboard uses
+        # for point-cloud vibration compensation.
+        self._latest_accel: Optional[Tuple[float, float, float]] = None
         self._point_callbacks = 0
         # Newest packet timing provenance, filled by ``_on_points``. ``None``
         # until a packet arrives, so "no data yet" stays distinguishable from
@@ -1082,6 +1087,7 @@ class LivoxMid360Source:
         with self._lock:
             self._latest_quaternion = quaternion
             self._latest_quaternion_at = time.monotonic()
+            self._latest_accel = (acc_x, acc_y, acc_z)
 
     # -------------------------------------------------------------- contract
 
@@ -1134,6 +1140,48 @@ class LivoxMid360Source:
             age = time.monotonic() - self._latest_quaternion_at
         valid = self._latest_quaternion_at > 0.0 and age <= self.imu_valid_max_age_s
         return (quaternion, valid)
+
+    def imu_sample(self) -> Optional[dict]:
+        """Return the newest gravity-referenced attitude in the sensor frame.
+
+        Reads the raw accelerometer (stored by the IMU callback) and derives
+        ``(roll, pitch)`` about the sensor's own ``+X`` / ``+Y`` axes, plus the
+        quaternion and acceleration vector.  Returns ``None`` until a fresh
+        sample has arrived, so a consumer can publish "no attitude" instead of
+        a fabricated level attitude.
+
+        The values are in the MID-360 sensor frame (``+X forward / +Y left /
+        +Z up``).  The dashboard converts them to its stabilization convention
+        in ``decoders/livox_imu.py``; keeping this accessor in the sensor frame
+        means the producer publishes what the device actually measured.
+        """
+        with self._lock:
+            accel = self._latest_accel
+            quaternion = self._latest_quaternion
+            age = time.monotonic() - self._latest_quaternion_at
+            seen = self._latest_quaternion_at > 0.0
+        if accel is None or not seen or age > self.imu_valid_max_age_s:
+            return None
+        ax, ay, az = accel
+        norm = math.sqrt(ax * ax + ay * ay + az * az)
+        if norm <= 1e-6 or not math.isfinite(norm):
+            return None
+        # Gravity direction is the specific force negated, normalised.  Keep it
+        # in the SENSOR frame (the dashboard converts frames, not this accessor).
+        gx, gy, gz = -ax / norm, -ay / norm, -az / norm
+        # Sensor frame is +X forward / +Y left / +Z up.  At rest gravity points
+        # along -Z, so both tilts are zero:
+        #   pitch: tilt about the sensor +Y (left) axis, from gravity tipping in X
+        #   roll:  tilt about the sensor +X (forward) axis, from gravity tipping in Y
+        pitch = math.atan2(gx, math.sqrt(gy * gy + gz * gz))
+        roll = math.atan2(gy, math.sqrt(gx * gx + gz * gz))
+        return {
+            "attitude_rpy_rad": [roll, pitch, 0.0],
+            "quaternion_xyzw": [float(v) for v in quaternion],
+            "accel_ms2": [float(ax), float(ay), float(az)],
+            "accel_norm_ms2": float(norm),
+            "frame_id": "mid360_link",
+        }
 
     def timestamp_status(self) -> dict:
         """Return how this scan's timestamps should be labelled.

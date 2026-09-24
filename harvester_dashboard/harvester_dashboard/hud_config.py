@@ -20,6 +20,7 @@ DOCKING = 'docking'
 CUTTER_RANGE = 'cutter_range'
 DOCK_GUIDANCE = 'dock_guidance'
 CUTTER_GUIDANCE = 'cutter_guidance'
+LIDAR_SCAN = 'lidar_scan'
 
 # Anchors accepted for a panel.  ``value`` is the position name used in JSON
 # (``<vertical>-<horizontal>``); ``horizontal``/``vertical`` below drive QML.
@@ -78,6 +79,24 @@ _DEFAULT_CUTTER_GUIDANCE_ROWS = {
     'max_speed': 'Max Safe',
 }
 
+# Default display names for the LiDAR scan overlay's estimate rows (see
+# model/scan_estimate.py / LidarScanOverlay.qml).  The overlay is a single
+# full-screen operator HUD: it shows scan instructions while scanning and swaps
+# to these estimate rows when the scan completes.
+_DEFAULT_LIDAR_SCAN_ROWS = {
+    'tree_height': 'Tree Height',
+    'trunk_top': 'Trunk Top',
+    'crown_base': 'Crown Base',
+    'uncertainty': 'Uncertainty',
+    'docking_height': 'Docking Height',
+    'boom_angle': 'Boom Angle',
+    'boom_extension': 'Boom Extension',
+    'platform_level': 'Platform Level',
+    'boom_distance': 'Boom Distance',
+    'docking_lower': 'Docking Lower Angle',
+    'status': 'Status',
+}
+
 
 @dataclass
 class HudPanelConfig:
@@ -102,6 +121,17 @@ class HudPanelConfig:
     banner_font_px: int = 40          # state-banner text size
     pulse_danger: bool = True         # pulse the banner while DANGER
     show_confirm_button: bool = True  # cutter: show the CONFIRM STEP button
+    # LiDAR scan-overlay-only extras (ignored by the other panels).  The overlay
+    # is full-screen and centred; ``zoom_*`` set the default/min/max half-width
+    # of the projected cloud window in metres, and ``guide_font_px`` /
+    # ``estimate_font_px`` size the instruction text and the estimate rows.
+    guide_font_px: int = 34
+    estimate_font_px: int = 34
+    zoom_default_m: float = 12.0
+    zoom_min_m: float = 3.0
+    zoom_max_m: float = 40.0
+    scan_seconds: float = 15.0        # guided scan duration (s)
+    redraw_hz: float = 12.0           # overlay repaint cap (CPU guard)
 
     def to_qml(self) -> Dict[str, Any]:
         """Return a plain dict suitable for a QVariantMap bridge property."""
@@ -121,6 +151,13 @@ class HudPanelConfig:
             'bannerFontPx': int(self.banner_font_px),
             'pulseDanger': bool(self.pulse_danger),
             'showConfirmButton': bool(self.show_confirm_button),
+            'guideFontPx': int(self.guide_font_px),
+            'estimateFontPx': int(self.estimate_font_px),
+            'zoomDefaultM': float(self.zoom_default_m),
+            'zoomMinM': float(self.zoom_min_m),
+            'zoomMaxM': float(self.zoom_max_m),
+            'scanSeconds': float(self.scan_seconds),
+            'redrawHz': float(self.redraw_hz),
         }
 
 
@@ -133,6 +170,7 @@ class HudLayoutConfig:
     cutter_range: HudPanelConfig
     dock_guidance: HudPanelConfig
     cutter_guidance: HudPanelConfig
+    lidar_scan: HudPanelConfig
 
     def to_qml(self) -> Dict[str, Any]:
         return {
@@ -141,6 +179,7 @@ class HudLayoutConfig:
             CUTTER_RANGE: self.cutter_range.to_qml(),
             DOCK_GUIDANCE: self.dock_guidance.to_qml(),
             CUTTER_GUIDANCE: self.cutter_guidance.to_qml(),
+            LIDAR_SCAN: self.lidar_scan.to_qml(),
         }
 
 
@@ -225,6 +264,29 @@ def default_hud_layout() -> HudLayoutConfig:
             pulse_danger=True,
             show_confirm_button=True,
         ),
+        lidar_scan=HudPanelConfig(
+            name=LIDAR_SCAN,
+            # The overlay itself is full-screen; this panel's anchor/width are
+            # advisory (its info card sits at the bottom-centre over the cloud)
+            # and remain admin-overridable like every other panel.
+            visible=True,
+            anchor='bottom-center',
+            caption='LIDAR SCAN',
+            width=820,
+            height=0,
+            value_font_px=46,
+            caption_font_px=30,
+            margin_px=16,
+            opacity=0.85,
+            rows=dict(_DEFAULT_LIDAR_SCAN_ROWS),
+            guide_font_px=34,
+            estimate_font_px=34,
+            zoom_default_m=12.0,
+            zoom_min_m=3.0,
+            zoom_max_m=40.0,
+            scan_seconds=15.0,
+            redraw_hz=12.0,
+        ),
     )
 
 def _as_int(value: Any, fallback: int) -> int:
@@ -297,6 +359,20 @@ def _merge_panel(base: HudPanelConfig, raw: Any, name: str) -> HudPanelConfig:
         pulse_danger=_as_bool(raw.get('pulse_danger'), base.pulse_danger),
         show_confirm_button=_as_bool(
             raw.get('show_confirm_button'), base.show_confirm_button),
+        guide_font_px=max(1, _as_int(
+            raw.get('guide_font_px'), base.guide_font_px)),
+        estimate_font_px=max(1, _as_int(
+            raw.get('estimate_font_px'), base.estimate_font_px)),
+        zoom_default_m=max(1e-3, _as_float(
+            raw.get('zoom_default_m'), base.zoom_default_m)),
+        zoom_min_m=max(1e-3, _as_float(
+            raw.get('zoom_min_m'), base.zoom_min_m)),
+        zoom_max_m=max(1e-3, _as_float(
+            raw.get('zoom_max_m'), base.zoom_max_m)),
+        scan_seconds=max(1e-3, _as_float(
+            raw.get('scan_seconds'), base.scan_seconds)),
+        redraw_hz=max(1e-3, _as_float(
+            raw.get('redraw_hz'), base.redraw_hz)),
     )
 
 
@@ -355,11 +431,14 @@ def load_hud_config(path: Optional[str]) -> HudLayoutConfig:
             layout.dock_guidance, data.get(DOCK_GUIDANCE), DOCK_GUIDANCE),
         cutter_guidance=_merge_panel(
             layout.cutter_guidance, data.get(CUTTER_GUIDANCE), CUTTER_GUIDANCE),
+        lidar_scan=_merge_panel(
+            layout.lidar_scan, data.get(LIDAR_SCAN), LIDAR_SCAN),
     )
 
 
 __all__ = [
     'BOOM', 'DOCKING', 'CUTTER_RANGE', 'DOCK_GUIDANCE', 'CUTTER_GUIDANCE',
+    'LIDAR_SCAN',
     'HudPanelConfig', 'HudLayoutConfig',
     'default_hud_layout', 'load_hud_config', 'default_hud_config_path',
 ]
