@@ -16,6 +16,15 @@ explicit and configurable in ``VENDOR_TO_PROJECT_AXES`` and can be overridden
 per deployment. Confirm the real mounting during calibration and record the
 verified vendor frame in the calibration session.
 
+Time note: the MID-360 does NOT run a UTC clock by itself. Its packet timestamp
+is meaningful in UTC only while it is slaved to an external time master
+(PTP/gPTP from this host, or GPS). Otherwise the timestamp is time since the
+device powered on. The per-packet ``time_type`` field (see ``TIME_TYPE_*`` and
+``decode_packet_time`` below) says which, and this adapter records it so callers
+can label the data honestly instead of assuming the LiDAR is synchronized. See
+``LivoxMid360Source.timestamp_status`` and the README's "MID-360 LiDAR time
+synchronization" section.
+
 SDK2 configuration is data-driven: ``sdk_config_path`` points at a JSON file
 (``LivoxLidarSdkInit`` reads it) whose ``MID360`` block holds the LiDAR and host
 addresses. This adapter does not invent a config; the deployment config for the
@@ -44,6 +53,40 @@ DEFAULT_LIDAR_IP = "192.168.50.30"
 DEFAULT_HOST_IP = "192.168.50.10"
 
 DEFAULT_SDK_LIBRARY = "liblivox_lidar_sdk_shared.so"
+
+# ---------------------------------------------------------------------------
+# Timestamps (Mid-360 Communication Protocol, section "Timestamp")
+# ---------------------------------------------------------------------------
+# Every point packet carries a 1-byte ``time_type`` that states how its 8-byte
+# ``timestamp`` field should be read. The MID-360 does NOT keep a UTC clock on
+# its own: it only becomes UTC-meaningful while it is slaved to a time master
+# (PTP/gPTP from this host, or GPS). This is the field that tells us whether
+# "synchronized" is true, so it is decoded rather than assumed.
+#
+#   0 -> no sync source; timestamp is ns since DEVICE POWER-ON (not UTC, and
+#        not comparable across reboots)
+#   1 -> PTP or gPTP; timestamp is the master clock in ns (PTP and gPTP are
+#        indistinguishable here: the protocol has no separate value)
+#   2 -> GPS; timestamp is GPS time in ns (valid 2000-01-01..2037-12-31)
+TIME_TYPE_NONE = 0x00
+TIME_TYPE_PTP = 0x01
+TIME_TYPE_GPS = 0x02
+
+# time_type values whose packet timestamp is an absolute (UTC/GPS) time rather
+# than a boot-relative counter. Only these may be published as UTC.
+ABSOLUTE_TIME_TYPES = (TIME_TYPE_PTP, TIME_TYPE_GPS)
+
+# ``time_interval`` is the span between the FIRST and LAST point in a packet and
+# is expressed in 0.1 us units (livox_lidar_def.h: "unit: 0.1 us"), so one unit
+# is 0.1 us = 100 ns. Multiply the raw field by this to get nanoseconds.
+_TIME_INTERVAL_NS_PER_UNIT = 100
+
+# LivoxLidarPpsSyncMode (livox_lidar_def.h). Consumed by ``SetLivoxLidarPpsSyncMode``
+# (protocol key 0x0026, "time_filter"). This is a GPS time-*robustness* flag, not
+# a general "turn sync on" switch: PTP needs no SDK call at all (the device
+# auto-syncs whenever a master is present on its link). Only the normal mode is
+# used here; see ``set_pps_sync_mode`` for the optional call.
+PPS_SYNC_NORMAL = 0x00
 
 # LivoxLidarWorkMode / LivoxLidarPointDataType (livox_lidar_def.h).
 WORK_MODE_NORMAL = 0x01
@@ -341,6 +384,48 @@ def _payload_view(packet_ptr, max_items, item_size_bytes):
     return np.frombuffer(raw, dtype=np.uint8)
 
 
+def decode_packet_time(header) -> dict:
+    """Return the timing provenance of one Ethernet packet.
+
+    The MID-360 states how to read its timestamp in the packet header itself, so
+    this is the single place that decides whether the LiDAR is actually
+    synchronized. Returns a dict with:
+
+      * ``time_type``      -- raw header byte (0 none, 1 PTP/gPTP, 2 GPS)
+      * ``timestamp_ns``   -- the header's 8-byte little-endian timestamp
+      * ``time_interval_ns`` -- span first..last point, converted from 0.1 us
+      * ``absolute``       -- True when ``timestamp_ns`` is a real UTC/GPS time
+      * ``source``         -- ``"ptp"``, ``"gps"``, ``"device_uptime"`` or
+                              ``"unknown"`` for a value this build does not know
+
+    ``timestamp_ns`` is only a wall-clock time when ``absolute`` is true. When it
+    is false the value is nanoseconds since the device powered on and must NOT be
+    published as UTC: a boot-relative counter silently masquerading as epoch time
+    is worse than no timestamp, because it looks plausible and is wrong.
+    """
+    time_type = int(header.time_type)
+    # ``timestamp`` is a packed ``uint8[8]``, little-endian, nanoseconds.
+    timestamp_ns = int.from_bytes(bytes(header.timestamp), "little")
+    # ``time_interval`` counts 0.1 us units between the first and last point,
+    # i.e. 100 ns per unit.
+    time_interval_ns = int(header.time_interval) * _TIME_INTERVAL_NS_PER_UNIT
+    if time_type == TIME_TYPE_PTP:
+        source = "ptp"
+    elif time_type == TIME_TYPE_GPS:
+        source = "gps"
+    elif time_type == TIME_TYPE_NONE:
+        source = "device_uptime"
+    else:
+        source = "unknown"
+    return {
+        "time_type": time_type,
+        "timestamp_ns": timestamp_ns,
+        "time_interval_ns": time_interval_ns,
+        "absolute": time_type in ABSOLUTE_TIME_TYPES,
+        "source": source,
+    }
+
+
 def _decode_points(payload: "np.ndarray") -> List[Tuple[float, float, float]]:
     """Decode packed 14-byte Cartesian points into millimetre XYZ tuples.
 
@@ -529,6 +614,17 @@ class _SdkBindings:
         ]
         self.lib.SetLivoxLidarIp.restype = ctypes.c_int
 
+        # ``SetLivoxLidarPpsSyncMode`` exists in the installed SDK for the
+        # MID-360S ("[mid360s] support this function, other not support"). Treat
+        # it as optional: bind it when present so the adapter stays loadable on
+        # SDK builds that lack it, and leave ``self.has_pps_sync_mode`` marking
+        # whether the call is actually available.
+        self.has_pps_sync_mode = hasattr(self.lib, "SetLivoxLidarPpsSyncMode")
+        if self.has_pps_sync_mode:
+            self.lib.SetLivoxLidarPpsSyncMode.argtypes = [
+                ctypes.c_uint32, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p]
+            self.lib.SetLivoxLidarPpsSyncMode.restype = ctypes.c_int
+
     def set_point_cloud_callback(self, callback, client_data) -> None:
         self.lib.SetLivoxLidarPointCloudCallBack(callback, client_data)
 
@@ -624,6 +720,21 @@ class _SdkBindings:
         return int(self.lib.SetLivoxLidarIp(
             handle, ctypes.byref(config), None, None))
 
+    def set_pps_sync_mode(self, handle: int, mode: int) -> int:
+        """Set the optional PPS/GPS time-filter robustness mode.
+
+        This is NOT how PTP is enabled: the MID-360 slaves to a PTP/gPTP master
+        automatically as soon as one is present on its link, with no SDK call.
+        ``SetLivoxLidarPpsSyncMode`` maps to protocol key ``0x0026``
+        ("time_filter"), which only tunes how the device reacts to GPS time
+        rollback. Returns ``None`` when the installed SDK does not expose the
+        call, so the caller can report that instead of guessing.
+        """
+        if not getattr(self, "has_pps_sync_mode", False):
+            return None
+        return int(self.lib.SetLivoxLidarPpsSyncMode(
+            handle, int(mode), None, None))
+
 
 class LivoxMid360Source:
     """Livox-SDK2 point + IMU source for the MID-360.
@@ -685,6 +796,20 @@ class LivoxMid360Source:
         self._latest_quaternion: Tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0)
         self._latest_quaternion_at: float = 0.0
         self._point_callbacks = 0
+        # Newest packet timing provenance, filled by ``_on_points``. ``None``
+        # until a packet arrives, so "no data yet" stays distinguishable from
+        # "data arrived and the LiDAR is unsynchronized".
+        self._latest_packet_time: Optional[dict] = None
+        # UTC ns at the moment the newest packet was received, and its monotonic
+        # twin so an age can be computed without a second clock read in a
+        # callback (which runs on an SDK thread and must stay cheap).
+        self._latest_arrival_utc_ns: Optional[int] = None
+        self._latest_arrival_monotonic_ns: Optional[int] = None
+        # How many packets arrived with an absolute (UTC/GPS) timestamp versus a
+        # boot-relative one. Lets a caller report "0 of N packets synchronized"
+        # instead of inferring sync from a single lucky sample.
+        self._absolute_time_packets = 0
+        self._uptime_time_packets = 0
 
         self._bindings: Optional[_SdkBindings] = None
         self._running = False
@@ -750,6 +875,36 @@ class LivoxMid360Source:
                 print(f"[livox] no streaming device after "
                       f"{self.startup_timeout_s:.0f}s; check the LiDAR is "
                       f"reachable at {self.lidar_ip or '<unset>'}")
+        self.report_time_sync()
+
+    def report_time_sync(self, wait_s: float = 1.0) -> dict:
+        """Print the LiDAR's actual time-sync state, once a packet has arrived.
+
+        Reads ``time_type`` from the first point packets rather than trusting a
+        configured assumption, and says plainly whether device timestamps are
+        usable UTC. This is the check that would have caught the unsynchronized
+        LiDAR: ``time_type 0`` means the device clock is boot-relative.
+        """
+        deadline = time.monotonic() + max(0.0, wait_s)
+        status = self.timestamp_status()
+        while (status["time_type"] is None and time.monotonic() < deadline):
+            time.sleep(0.05)
+            status = self.timestamp_status()
+        if status["time_type"] is None:
+            print("[livox] time sync: no point packets yet; cannot confirm the "
+                  "LiDAR clock (device time stays unverified until data arrives)")
+            return status
+        if status["synchronized"]:
+            print(f"[livox] time sync: SYNCHRONIZED via {status['source']} "
+                  f"(time_type={status['time_type']}); device timestamps are "
+                  "absolute UTC and used as acquisition time")
+        else:
+            print(f"[livox] time sync: NOT SYNCHRONIZED (time_type="
+                  f"{status['time_type']}, source={status['source']}); the "
+                  "device timestamp is time since LiDAR power-on, so the host "
+                  "receive clock is used as acquisition time. Start a PTP "
+                  "master on the sensor NIC (see deploy/ptp/) to fix this.")
+        return status
 
     def close(self, stop_motor: bool = True) -> None:
         """Stop streaming and release the SDK.
@@ -808,6 +963,15 @@ class LivoxMid360Source:
                 self._host_imu_data_port, self._lidar_imu_data_port)
         # Match the decoder to the wire format: 14-byte single-return Cartesian.
         bindings.set_point_data_type(handle, POINT_TYPE_CARTESIAN_HIGH)
+        # Optional GPS time-filter robustness flag. This does NOT enable PTP: the
+        # MID-360 slaves to a PTP/gPTP master automatically whenever one is on
+        # its link. Only attempt it when the installed SDK exposes the call, and
+        # never let it block the start sequence.
+        if getattr(bindings, "has_pps_sync_mode", False):
+            pps_status = bindings.set_pps_sync_mode(handle, PPS_SYNC_NORMAL)
+            if pps_status not in (0, None):
+                print(f"[livox] PPS sync mode returned {pps_status} for handle "
+                      f"{handle} (optional; continuing)")
         status = bindings.set_work_mode(handle, WORK_MODE_NORMAL)
         if status != 0:
             print(f"[livox] work-mode start failed for handle {handle} "
@@ -874,10 +1038,32 @@ class LivoxMid360Source:
             packet_ptr, _MAX_POINTS_PER_CALLBACK, _RAW_POINT_SIZE_BYTES)
         if payload is None:
             return
+        # Read the packet's timing provenance BEFORE decoding points: even a
+        # packet whose points are all filtered out still tells us whether the
+        # LiDAR is currently synchronized, which is what the operator needs.
+        # The arrival timestamp is taken here, on the SDK thread, so it reflects
+        # when the datagram actually arrived rather than when a consumer later
+        # drained the queue.
+        arrival_utc_ns = time.time_ns()
+        arrival_monotonic_ns = time.monotonic_ns()
+        try:
+            header = ctypes.cast(
+                packet_ptr, ctypes.POINTER(_EthPacketHeader)).contents
+            packet_time = decode_packet_time(header)
+        except (ValueError, TypeError):  # pragma: no cover - defensive
+            packet_time = None
         points = _decode_points(payload)
-        if not points:
-            return
         with self._lock:
+            if packet_time is not None:
+                self._latest_packet_time = packet_time
+                self._latest_arrival_utc_ns = arrival_utc_ns
+                self._latest_arrival_monotonic_ns = arrival_monotonic_ns
+                if packet_time["absolute"]:
+                    self._absolute_time_packets += 1
+                else:
+                    self._uptime_time_packets += 1
+            if not points:
+                return
             self._point_callbacks += 1
             self._point_queue.extend(points)
 
@@ -949,6 +1135,158 @@ class LivoxMid360Source:
         valid = self._latest_quaternion_at > 0.0 and age <= self.imu_valid_max_age_s
         return (quaternion, valid)
 
+    def timestamp_status(self) -> dict:
+        """Return how this scan's timestamps should be labelled.
+
+        The single source of truth for "is the LiDAR synchronized". Callers must
+        decide what to publish from this, rather than assuming the device runs
+        UTC. Keys:
+
+          * ``synchronized``       -- the newest packet carried an absolute
+                                     (PTP/GPS) timestamp, so device time is real
+                                     UTC and may be published as such
+          * ``time_type``          -- raw newest ``time_type`` (or ``None``)
+          * ``source``             -- ``"ptp"``/``"gps"``/``"device_uptime"``/
+                                     ``"unknown"``/``"no_data"``
+          * ``device_timestamp_ns``-- newest packet's own timestamp
+          * ``arrival_utc_ns``     -- UTC ns this host received that packet
+          * ``arrival_age_s``      -- how long ago that was (``None`` if never)
+          * ``absolute_packets``/``uptime_packets`` -- running counts
+
+        ``synchronized`` is False when nothing has arrived yet: an unknown clock
+        must never be reported as sync'd.
+
+        This reports the DEVICE's current state. To stamp a scan, use
+        :meth:`timing_snapshot`, which additionally applies the freshness check
+        and returns the chosen value alongside its provenance.
+        """
+        now_monotonic_ns = time.monotonic_ns()
+        with self._lock:
+            packet_time = self._latest_packet_time
+            arrival_utc_ns = self._latest_arrival_utc_ns
+            arrival_monotonic_ns = self._latest_arrival_monotonic_ns
+            absolute_packets = self._absolute_time_packets
+            uptime_packets = self._uptime_time_packets
+        if packet_time is None:
+            return {
+                "synchronized": False,
+                "time_type": None,
+                "source": "no_data",
+                "device_timestamp_ns": None,
+                "arrival_utc_ns": None,
+                "arrival_age_s": None,
+                "absolute_packets": absolute_packets,
+                "uptime_packets": uptime_packets,
+            }
+        age_s = None
+        if arrival_monotonic_ns is not None:
+            age_s = max(0.0, (now_monotonic_ns - arrival_monotonic_ns) / 1e9)
+        return {
+            "synchronized": bool(packet_time["absolute"]),
+            "time_type": packet_time["time_type"],
+            "source": packet_time["source"],
+            "device_timestamp_ns": packet_time["timestamp_ns"],
+            "arrival_utc_ns": arrival_utc_ns,
+            "arrival_age_s": age_s,
+            "absolute_packets": absolute_packets,
+            "uptime_packets": uptime_packets,
+        }
+
+    def timing_snapshot(self, max_age_s: float = 1.0) -> dict:
+        """Return the chosen acquisition time and its provenance in ONE read.
+
+        This is the only method a publisher should use to stamp a scan. It exists
+        so the timestamp and the status that describes it cannot disagree: when a
+        caller instead called ``acquisition_timestamp_ns()`` and
+        ``timestamp_status()`` separately, a stale PTP sample could be returned as
+        host time while the status still reported ``ptp`` and ``synchronized``,
+        producing a header that says "PTP" over a host-clock number.
+
+        Keys:
+
+          * ``timestamp_ns`` -- the acquisition time to publish
+          * ``source``       -- ``livox_ptp`` / ``livox_gps`` / ``host_arrival`` /
+                                ``host_now``
+          * ``clock_domain`` -- ``lidar_ptp_utc`` for a LiDAR clock, else
+                                ``orin_realtime``
+          * ``synchronized`` -- True only when the value is the LiDAR's own
+                                absolute time (so it may be called UTC)
+          * ``time_type``    -- raw newest ``time_type`` (``None`` if no packet)
+          * ``lidar_source`` -- the raw device state: ``ptp``/``gps``/
+                                ``device_uptime``/``unknown``/``no_data``
+          * ``arrival_age_s``-- how long ago the newest packet arrived
+
+        Preference order, and why:
+
+          1. ``livox_ptp``/``livox_gps`` -- the LiDAR's own timestamp, only when
+             the packet ``time_type`` is absolute AND fresh. This is the true
+             acquisition time the sensor measured.
+          2. ``host_arrival`` -- this host's ``CLOCK_REALTIME`` at the moment the
+             newest packet arrived, used when the LiDAR is not synchronized
+             (``time_type == 0``). Real UTC only insofar as the Orin is
+             disciplined; the header's ``time_quality`` reports that separately.
+          3. ``host_now`` -- the host clock sampled now, used when no packet has
+             ever arrived. It is publish time, not acquisition time, and is
+             labelled as such.
+        """
+        now_utc_ns = time.time_ns()
+        now_monotonic_ns = time.monotonic_ns()
+        with self._lock:
+            packet_time = self._latest_packet_time
+            arrival_utc_ns = self._latest_arrival_utc_ns
+            arrival_monotonic_ns = self._latest_arrival_monotonic_ns
+        if packet_time is None:
+            return {
+                "timestamp_ns": int(now_utc_ns),
+                "source": "host_now",
+                "clock_domain": "orin_realtime",
+                "synchronized": False,
+                "time_type": None,
+                "lidar_source": "no_data",
+                "arrival_age_s": None,
+            }
+        age_s = None
+        if arrival_monotonic_ns is not None:
+            age_s = max(0.0, (now_monotonic_ns - arrival_monotonic_ns) / 1e9)
+        fresh = age_s is not None and age_s <= max_age_s
+        if packet_time["absolute"] and fresh:
+            source = "livox_ptp" if packet_time["time_type"] == TIME_TYPE_PTP else "livox_gps"
+            return {
+                "timestamp_ns": int(packet_time["timestamp_ns"]),
+                "source": source,
+                "clock_domain": "lidar_ptp_utc",
+                "synchronized": True,
+                "time_type": packet_time["time_type"],
+                "lidar_source": packet_time["source"],
+                "arrival_age_s": age_s,
+            }
+        # Not an absolute-and-fresh LiDAR sample. Prefer the newest packet's real
+        # receive time; fall back to publish time only if nothing ever arrived.
+        if arrival_utc_ns is not None:
+            timestamp_ns, source = int(arrival_utc_ns), "host_arrival"
+        else:
+            timestamp_ns, source = int(now_utc_ns), "host_now"
+        return {
+            "timestamp_ns": timestamp_ns,
+            "source": source,
+            "clock_domain": "orin_realtime",
+            # The value is host time, so it is NOT the LiDAR's synchronized time
+            # even if the device clock itself is absolute: the sample was stale.
+            "synchronized": False,
+            "time_type": packet_time["time_type"],
+            "lidar_source": packet_time["source"],
+            "arrival_age_s": age_s,
+        }
+
+    def acquisition_timestamp_ns(self, max_age_s: float = 1.0) -> Tuple[int, str]:
+        """Return ``(timestamp_ns, source)`` for a freshly drained scan.
+
+        Thin wrapper over :meth:`timing_snapshot`; callers that also need the
+        status should use ``timing_snapshot`` so the two cannot disagree.
+        """
+        snapshot = self.timing_snapshot(max_age_s=max_age_s)
+        return snapshot["timestamp_ns"], snapshot["source"]
+
     def sample(self, max_points: int) -> Tuple[List[Tuple[float, float, float]],
                                                Tuple[float, float, float, float],
                                                bool,
@@ -958,6 +1296,10 @@ class LivoxMid360Source:
         Points are drained from the SDK queue, converted to the project frame in
         metres, and capped at ``max_points``. ``valid`` is true only when the
         requested orientation source has a fresh sample.
+
+        Timing is NOT part of this tuple: use :meth:`timestamp_status` or
+        :meth:`acquisition_timestamp_ns` so the 4-tuple stays back-compatible for
+        the existing ``level_source`` callers.
         """
         points = self._drain(max_points)
         quaternion, valid = self._orientation()
@@ -976,4 +1318,13 @@ class LivoxMid360Source:
                 "queued_points": len(self._point_queue),
                 "point_callbacks": self._point_callbacks,
                 "imu_seen": self._latest_quaternion_at > 0.0,
+                "time_sync_type": (
+                    None if self._latest_packet_time is None
+                    else self._latest_packet_time["time_type"]),
+                "time_sync_source": (
+                    "no_data" if self._latest_packet_time is None
+                    else self._latest_packet_time["source"]),
+                "absolute_time_packets": self._absolute_time_packets,
+                "uptime_time_packets": self._uptime_time_packets,
             }
+

@@ -149,8 +149,123 @@ Run `python3 scripts/validate_camera_time_sync.py --duration 300
 is missing, timestamps regress, chrony is not synchronized, or inferred
 combined clock-offset drift exceeds 10 ms.
 
-PTP/Livox and PLC/Modbus timestamp registers are intentionally not configured
-in this phase.
+PLC/Modbus timestamp registers are intentionally not configured in this phase.
+
+## MID-360 LiDAR time synchronization
+
+**The MID-360 does NOT run a UTC clock on its own.** By default its point
+timestamps are nanoseconds *since the LiDAR powered on*. The device only stamps
+absolute time while it is slaved to an external time master over PTP/gPTP (or
+GPS). Livox's protocol makes the LiDAR always the PTP **slave**, so **the Orin
+must be the PTP master**. Until a master is present, the LiDAR is genuinely
+unsynchronized — this is not a configuration oversight that a small code change
+can paper over.
+
+Each point packet carries a `time_type` byte that states this explicitly:
+
+| `time_type` | Meaning | Usable as UTC? |
+|---|---|---|
+| `0` | no sync source; timestamp = ns since device power-on | **No** |
+| `1` | PTP or gPTP; timestamp = master clock in ns | Yes |
+| `2` | GPS; timestamp = GPS time in ns | Yes |
+
+`lidar/livox_source.py` decodes this field per packet and never assumes the
+sensor is synchronized. `LivoxMid360Source.timing_snapshot()` is the single
+source of truth: it returns the chosen acquisition time **and** the status that
+describes it in one read, so the timestamp and its label can never disagree (a
+separate status call could otherwise label a stale host-clock value as `ptp`).
+`timestamp_status()` remains available for device-state diagnostics.
+
+The snapshot picks the acquisition time in this order:
+
+1. the LiDAR's **own** PTP/GPS timestamp when `time_type` is 1 or 2 **and** the
+   sample is fresh (immune to host scheduling jitter), else
+2. the **Orin's `CLOCK_REALTIME` at packet arrival** when the LiDAR is not
+   synchronized (or the absolute sample is stale) — a boot-relative counter must
+   never be published as epoch time, and the Orin clock is real UTC only insofar
+   as chrony disciplines it (see the camera section above), else
+3. `host_now` (publish time, clearly labelled) when no packet has ever arrived.
+
+The canonical `v1/lidar/raw` header reports which happened, so a consumer can
+tell the difference without guessing:
+
+| Field | Values |
+|---|---|
+| `clock_domain` | `lidar_ptp_utc` (LiDAR synced) or `orin_realtime` (host fallback) |
+| `timestamp_source` | `livox_ptp`, `livox_gps`, `host_arrival`, or `host_now` |
+| `lidar_time_sync` | bool — was the sensor clock absolute for this scan |
+| `lidar_time_type` | the raw `time_type` byte |
+| `lidar_time_source` | `ptp` / `gps` / `device_uptime` / `unknown` / `no_data` |
+| `time_quality` | Orin chrony health (`synchronized` / `holdover` / ...) |
+
+`time_quality` and `lidar_time_sync` are **independent**: the host can be
+disciplined while the LiDAR is not, and vice versa.
+
+### Enabling PTP (making the LiDAR timestamps absolute)
+
+Status: **verified working on the deployment Orin NX** (2026-09-23). The
+MID-360 reports `time_type=1` and the adapter publishes `livox_ptp` /
+`lidar_ptp_utc`.
+
+```bash
+# Inspect first: reports whether the sensor NIC can hardware-timestamp and
+# whether the Orin's own clock is disciplined. Read-only; safe to run any time.
+sudo deploy/ptp/setup_ptp_master.sh --check-only
+
+# Install linuxptp, install the master config, launch ptp4l, and self-check
+# that it actually started (it fails loudly instead of backgrounding a dead
+# service).
+sudo deploy/ptp/setup_ptp_master.sh eth1
+
+# Persist across reboots:
+sudo cp deploy/ptp/ptp4l-orin-master.cfg /etc/linuxptp/
+sudo cp deploy/systemd/ptp4l-master@.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now ptp4l-master@eth1.service
+```
+
+Confirm the master role, then confirm from the **device** (not from the config):
+
+```bash
+# Orin is grandmaster on eth1:
+journalctl -u ptp4l-master@eth1.service -n 20 | grep -E "MASTER|grand master"
+
+# Device accepted us (this is the only authoritative check):
+PYTHONPATH=canonical_zmq:. python3 -m canonical_zmq_publisher.lidar_capture \
+    --sdk-mode livox-sdk --sdk-config ./mid360_config.json --enabled
+# look for: [livox] time sync: SYNCHRONIZED via ptp (time_type=1)
+```
+
+Measured on the deployment unit with PTP locked: the LiDAR and Orin clocks agree
+to roughly **1–2 ms (σ ≈ 0.5 ms)**. That offset is dominated by software
+timestamping plus UDP/kernel/SDK delivery latency, not by clock disagreement.
+
+**Hardware caveat (verified on the current Orin NX dev kit).** The sensor NIC
+here is `eth1` = Realtek RTL8168 (`r8168`), which has **no PTP hardware clock
+and no hardware timestamping**; the Orin's only PHC (`/dev/ptp0`) belongs to
+`eth0` (Microchip lan743x, the desk/WAN NIC). `ptp4l` therefore uses *software*
+timestamping, which carries microseconds-to-milliseconds of NIC/IRQ/scheduler
+jitter. That is acceptable for dating a LiDAR scan and for the `time_type==1`
+handshake, but it is not precision time transfer. For sub-microsecond accuracy,
+move the MID-360 onto a NIC with its own PHC and set `time_stamping hardware` in
+`deploy/ptp/ptp4l-orin-master.cfg`. Verify any candidate NIC with
+`ethtool -T <iface>` (needs `SOF_TIMESTAMPING_RAW_HARDWARE`).
+
+**Two independent clocks — do not conflate them.** PTP makes the **LiDAR** clock
+absolute. The Orin's **own** `CLOCK_REALTIME` is disciplined separately by chrony
+against the PLC's battery-backed RTC at `192.168.50.40`. When the PLC is stopped
+(as during commissioning) the Orin falls back to its own local clock, so the
+host-arrival fallback path is only as good as the Orin RTC — while the LiDAR PTP
+path stays correct regardless. Check both:
+
+```bash
+chronyc tracking     # Orin clock: want Leap status Normal + the PLC reference
+```
+
+`SetLivoxLidarPpsSyncMode` is bound when the installed SDK exposes it (the
+header documents it for the MID-360S). It is a GPS time-*robustness* filter, not
+a switch that enables PTP, so a missing symbol is harmless and never blocks the
+start sequence.
 
 ## Frame transforms and calibration foundation
 

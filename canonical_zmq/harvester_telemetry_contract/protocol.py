@@ -35,7 +35,20 @@ CANONICAL_CHANNELS = frozenset({
 })
 
 _SOURCE_MODES = frozenset({'simulation', 'hardware'})
-_CLOCK_DOMAINS = frozenset({'ros_sim_time', 'utc_host', 'plc_rtc_utc'})
+# Clock domains a header's acquisition_timestamp_ns may be expressed in:
+#   ros_sim_time  -- simulator clock, not wall time
+#   utc_host      -- this host's CLOCK_REALTIME (UTC)
+#   plc_rtc_utc   -- PLC battery-backed RTC, NTP-served UTC (the authority)
+#   orin_realtime -- this Orin's CLOCK_REALTIME, used when the sensor has no
+#                    absolute clock of its own; UTC to within the HOST's own
+#                    sync error, which the header's time_quality/time_authority
+#                    report separately
+#   lidar_ptp_utc -- the LiDAR's own PTP/GPS-synchronized timestamp
+# The last two exist so a sensor that is NOT synchronized is never mislabelled
+# as plc_rtc_utc: the label must describe the clock the number really came from.
+_CLOCK_DOMAINS = frozenset({
+    'ros_sim_time', 'utc_host', 'plc_rtc_utc', 'orin_realtime', 'lidar_ptp_utc',
+})
 _GLOBAL_FIELDS = {
     'schema_version': int,
     'source_mode': str,

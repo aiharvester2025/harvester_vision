@@ -3,10 +3,14 @@ import ctypes
 import math
 import struct
 import tempfile
+import time
 import unittest
 
 from lidar.livox_source import (
     LivoxMid360Source,
+    TIME_TYPE_GPS,
+    TIME_TYPE_NONE,
+    TIME_TYPE_PTP,
     WORK_MODE_NORMAL,
     WORK_MODE_UNVERIFIED_STOP,
     WORK_MODE_WAKE_UP,
@@ -21,6 +25,7 @@ from lidar.livox_source import (
     _RAW_POINT_SIZE_BYTES,
     _resolve_axis,
     _SDK_CALLBACK_BUFFER_BYTES,
+    decode_packet_time,
     default_sdk_config,
     write_default_sdk_config,
 )
@@ -276,6 +281,217 @@ class BacklogTests(unittest.TestCase):
         source = LivoxMid360Source(level_source="imu", auto_start=False)
         with self.assertRaises(ValueError):
             source._handle_for_ip("192.168.50")
+
+
+class PacketTimeDecodingTests(unittest.TestCase):
+    """``time_type`` decides whether a LiDAR timestamp is UTC or boot-relative."""
+
+    def _header(self, time_type, timestamp_ns=0, time_interval=0):
+        header = _EthPacketHeader()
+        header.time_type = time_type
+        header.time_interval = time_interval
+        header.timestamp = (ctypes.c_uint8 * 8).from_buffer_copy(
+            struct.pack("<Q", timestamp_ns))
+        return header
+
+    def test_unsynchronized_timestamp_is_boot_relative_not_absolute(self):
+        # time_type 0 is the MID-360's "no sync source" state: the timestamp is
+        # nanoseconds since the device powered on and must NEVER be treated as
+        # UTC, because it looks like a plausible (but wrong) epoch time.
+        decoded = decode_packet_time(self._header(TIME_TYPE_NONE, 123456789))
+        self.assertEqual(decoded["time_type"], TIME_TYPE_NONE)
+        self.assertFalse(decoded["absolute"])
+        self.assertEqual(decoded["source"], "device_uptime")
+        self.assertEqual(decoded["timestamp_ns"], 123456789)
+
+    def test_ptp_timestamp_is_absolute(self):
+        decoded = decode_packet_time(
+            self._header(TIME_TYPE_PTP, 1_700_000_000_000_000_000))
+        self.assertTrue(decoded["absolute"])
+        self.assertEqual(decoded["source"], "ptp")
+
+    def test_gps_timestamp_is_absolute(self):
+        decoded = decode_packet_time(
+            self._header(TIME_TYPE_GPS, 1_700_000_000_000_000_000))
+        self.assertTrue(decoded["absolute"])
+        self.assertEqual(decoded["source"], "gps")
+
+    def test_unknown_time_type_is_not_treated_as_absolute(self):
+        # A value this build does not know must fail closed: better to fall back
+        # to host time than to publish an unverified number as UTC.
+        decoded = decode_packet_time(self._header(0x07, 42))
+        self.assertFalse(decoded["absolute"])
+        self.assertEqual(decoded["source"], "unknown")
+
+    def test_time_interval_is_converted_from_tenths_of_a_microsecond(self):
+        # livox_lidar_def.h documents time_interval in 0.1 us units, i.e. 100 ns
+        # per unit. So 100 units is 10 us = 10000 ns.
+        decoded = decode_packet_time(self._header(TIME_TYPE_PTP, 0, time_interval=100))
+        self.assertEqual(decoded["time_interval_ns"], 10_000)
+
+    def test_timestamp_is_decoded_little_endian(self):
+        header = self._header(TIME_TYPE_PTP)
+        # 0x0102030405060708 in little-endian byte order.
+        header.timestamp = (ctypes.c_uint8 * 8)(
+            0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01)
+        self.assertEqual(
+            decode_packet_time(header)["timestamp_ns"], 0x0102030405060708)
+
+
+class TimeSyncStatusTests(unittest.TestCase):
+    """The adapter must report "not synchronized" until packets prove otherwise."""
+
+    def _packet(self, time_type, device_time_ns, points=1):
+        buffer = (ctypes.c_uint8 * _SDK_CALLBACK_BUFFER_BYTES)()
+        header = ctypes.cast(
+            ctypes.addressof(buffer), ctypes.POINTER(_EthPacketHeader)).contents
+        header.length = _ETH_PACKET_HEADER_SIZE_BYTES + points * _RAW_POINT_SIZE_BYTES
+        header.dot_num = points
+        header.time_type = time_type
+        header.time_interval = 0
+        header.timestamp = (ctypes.c_uint8 * 8).from_buffer_copy(
+            struct.pack("<Q", device_time_ns))
+        return buffer
+
+    def test_no_packets_yet_is_not_reported_as_synchronized(self):
+        # An unknown clock must never be claimed as sync'd.
+        source = LivoxMid360Source(level_source="imu", auto_start=False)
+        status = source.timestamp_status()
+        self.assertFalse(status["synchronized"])
+        self.assertIsNone(status["time_type"])
+        self.assertEqual(status["source"], "no_data")
+
+    def test_ptp_packets_report_synchronized_and_use_device_time(self):
+        source = LivoxMid360Source(level_source="imu", auto_start=False)
+        device_ns = 1_700_000_000_000_000_000
+        packet = self._packet(TIME_TYPE_PTP, device_ns)
+        source._on_points(0, None, ctypes.addressof(packet), None)
+        status = source.timestamp_status()
+        self.assertTrue(status["synchronized"])
+        self.assertEqual(status["source"], "ptp")
+        timestamp_ns, origin = source.acquisition_timestamp_ns()
+        self.assertEqual(timestamp_ns, device_ns)
+        self.assertEqual(origin, "livox_ptp")
+
+    def test_unsynchronized_packets_fall_back_to_host_clock(self):
+        # The device timestamp here is "seconds since boot"; publishing it as
+        # UTC would look like 1970. The host receive time must be used instead.
+        source = LivoxMid360Source(level_source="imu", auto_start=False)
+        packet = self._packet(TIME_TYPE_NONE, 5_000_000_000)  # 5 s after boot
+        before_ns = time.time_ns()
+        source._on_points(0, None, ctypes.addressof(packet), None)
+        status = source.timestamp_status()
+        self.assertFalse(status["synchronized"])
+        self.assertEqual(status["source"], "device_uptime")
+        # The arrival timestamp recorded in the callback is host "now".
+        self.assertGreaterEqual(status["arrival_utc_ns"], before_ns)
+        timestamp_ns, origin = source.acquisition_timestamp_ns()
+        after_ns = time.time_ns()
+        self.assertEqual(origin, "host_arrival")
+        # Host time is now, not the tiny boot-relative counter. Bounded below by
+        # the pre-callback sample and above by a fresh read taken afterwards.
+        self.assertGreaterEqual(timestamp_ns, before_ns)
+        self.assertLessEqual(timestamp_ns, after_ns)
+        self.assertGreater(timestamp_ns, 1_600_000_000_000_000_000)
+        self.assertNotEqual(timestamp_ns, 5_000_000_000)
+
+    def test_stale_absolute_sample_falls_back_to_host_clock(self):
+        # A PTP-stamped packet that is older than max_age_s must not be reused as
+        # the acquisition time for a later cloud.
+        source = LivoxMid360Source(level_source="imu", auto_start=False)
+        device_ns = 1_700_000_000_000_000_000
+        packet = self._packet(TIME_TYPE_PTP, device_ns)
+        source._on_points(0, None, ctypes.addressof(packet), None)
+        timestamp_ns, origin = source.acquisition_timestamp_ns(max_age_s=0.0)
+        self.assertEqual(origin, "host_arrival")
+        self.assertNotEqual(timestamp_ns, device_ns)
+
+    def test_host_fallback_uses_packet_arrival_not_publish_time(self):
+        # The fallback must return when the packet ARRIVED, not when the consumer
+        # later asked for it: re-stamping an older scan with the publish time is
+        # exactly the silent-lie failure this adapter exists to prevent.
+        source = LivoxMid360Source(level_source="imu", auto_start=False)
+        packet = self._packet(TIME_TYPE_NONE, 5_000_000_000)
+        source._on_points(0, None, ctypes.addressof(packet), None)
+        arrival_ns = source.timestamp_status()["arrival_utc_ns"]
+        time.sleep(0.05)  # a later drain must not change the answer
+        timestamp_ns, origin = source.acquisition_timestamp_ns()
+        self.assertEqual(origin, "host_arrival")
+        self.assertEqual(timestamp_ns, arrival_ns)
+
+    def test_no_packet_at_all_is_labelled_host_now_not_host_arrival(self):
+        # With no packet ever received there is no acquisition time; the publish
+        # clock is used but must be labelled distinctly so a consumer is not told
+        # a scan was captured when it was only published.
+        source = LivoxMid360Source(level_source="imu", auto_start=False)
+        timestamp_ns, origin = source.acquisition_timestamp_ns()
+        self.assertEqual(origin, "host_now")
+        self.assertGreater(timestamp_ns, 1_600_000_000_000_000_000)
+
+    def test_timing_snapshot_is_self_consistent_for_a_fresh_ptp_sample(self):
+        source = LivoxMid360Source(level_source="imu", auto_start=False)
+        device_ns = 1_700_000_000_000_000_000
+        packet = self._packet(TIME_TYPE_PTP, device_ns)
+        source._on_points(0, None, ctypes.addressof(packet), None)
+        snap = source.timing_snapshot()
+        self.assertEqual(snap["timestamp_ns"], device_ns)
+        self.assertEqual(snap["source"], "livox_ptp")
+        self.assertEqual(snap["clock_domain"], "lidar_ptp_utc")
+        self.assertTrue(snap["synchronized"])
+        self.assertEqual(snap["time_type"], TIME_TYPE_PTP)
+
+    def test_stale_ptp_sample_is_not_published_as_synchronized(self):
+        # The regression this guards: a stale absolute packet must NOT come back
+        # as a host-clock value while still claiming ptp/synchronized, which
+        # would put a "PTP" label on a host-time number.
+        source = LivoxMid360Source(level_source="imu", auto_start=False)
+        device_ns = 1_700_000_000_000_000_000
+        packet = self._packet(TIME_TYPE_PTP, device_ns)
+        source._on_points(0, None, ctypes.addressof(packet), None)
+        snap = source.timing_snapshot(max_age_s=0.0)
+        self.assertFalse(snap["synchronized"])
+        self.assertEqual(snap["clock_domain"], "orin_realtime")
+        self.assertEqual(snap["source"], "host_arrival")
+        self.assertNotEqual(snap["timestamp_ns"], device_ns)
+
+    def test_timing_snapshot_labels_a_host_fallback_consistently(self):
+        source = LivoxMid360Source(level_source="imu", auto_start=False)
+        packet = self._packet(TIME_TYPE_NONE, 5_000_000_000)
+        source._on_points(0, None, ctypes.addressof(packet), None)
+        snap = source.timing_snapshot()
+        self.assertFalse(snap["synchronized"])
+        self.assertEqual(snap["clock_domain"], "orin_realtime")
+        self.assertEqual(snap["source"], "host_arrival")
+        self.assertEqual(snap["time_type"], TIME_TYPE_NONE)
+        self.assertEqual(snap["lidar_source"], "device_uptime")
+
+    def test_timing_snapshot_with_no_packet_is_host_now(self):
+        source = LivoxMid360Source(level_source="imu", auto_start=False)
+        snap = source.timing_snapshot()
+        self.assertEqual(snap["source"], "host_now")
+        self.assertEqual(snap["clock_domain"], "orin_realtime")
+        self.assertFalse(snap["synchronized"])
+        self.assertIsNone(snap["time_type"])
+        self.assertEqual(snap["lidar_source"], "no_data")
+
+    def test_stats_surface_time_sync_state(self):
+        source = LivoxMid360Source(level_source="imu", auto_start=False)
+        self.assertIsNone(source.stats["time_sync_type"])
+        packet = self._packet(TIME_TYPE_NONE, 1)
+        source._on_points(0, None, ctypes.addressof(packet), None)
+        self.assertEqual(source.stats["time_sync_type"], TIME_TYPE_NONE)
+        self.assertEqual(source.stats["time_sync_source"], "device_uptime")
+        self.assertEqual(source.stats["uptime_time_packets"], 1)
+
+
+class PpsSyncModeTests(unittest.TestCase):
+    def test_pps_sync_mode_is_optional_when_the_sdk_lacks_it(self):
+        # The call is not in every SDK build/firmware; a missing symbol must
+        # report None rather than raise or silently pretend it succeeded.
+        from lidar.livox_source import _SdkBindings
+        bindings = _SdkBindings.__new__(_SdkBindings)  # no library load
+        bindings.has_pps_sync_mode = False
+        self.assertIsNone(bindings.set_pps_sync_mode(handle=1, mode=0))
 
 
 if __name__ == "__main__":

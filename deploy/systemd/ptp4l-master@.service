@@ -1,0 +1,23 @@
+[Unit]
+Description=Harvester PTP master for the MID-360 LiDAR (%i)
+Documentation=file:/home/marcop/harvester_vision/deploy/ptp/ptp4l-orin-master.cfg
+# The LiDAR needs a PTP master to have any absolute clock at all, and this host
+# needs chrony so that its own CLOCK_REALTIME (used as the LiDAR timestamp
+# fallback) is real UTC. Order after both network and time sync.
+Wants=chrony.service
+After=network-online.target chrony.service
+
+[Service]
+Type=simple
+# %i is the sensor interface (deploy: eth1). Quote it so an invalid/empty value
+# fails with a clear "Cannot find device" rather than splitting into extra args,
+# and check it exists first for an obvious error instead of a restart loop.
+ExecStartPre=/sbin/ip link show "%i"
+ExecStartPre=/sbin/ip link set "%i" up
+ExecStart=/usr/sbin/ptp4l -i "%i" -f /etc/linuxptp/ptp4l-orin-master.cfg -m
+Restart=always
+RestartSec=3
+# ptp4l needs to open raw/PTP sockets; keep it non-root-caps-minimal but simple.
+
+[Install]
+WantedBy=multi-user.target

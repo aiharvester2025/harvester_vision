@@ -214,5 +214,82 @@ class ControlTest(unittest.TestCase):
             capture.control_socket.close(0)
 
 
+class TimingSnapshotTest(unittest.TestCase):
+    """The emitted clock_domain/timestamp_source must match the timestamp used.
+
+    The adapter must never label a host-clock value 'lidar_ptp_utc', and must
+    never label a boot-relative device counter as synchronized.
+    """
+
+    def _capture_with_source(self, snapshot):
+        # Build a capture without touching ZMQ/hardware, then swap in a fake
+        # source whose timing_snapshot returns the case under test.
+        capture = LidarCapture.__new__(LidarCapture)
+        capture.sdk_mode = 'livox-sdk'
+        capture._source = type('FakeSource', (), {
+            'timing_snapshot': lambda self, max_age_s=1.0: dict(snapshot),
+        })()
+
+        class _NoSocket:
+            def close(self, *_args):
+                pass
+
+        capture.push_socket = _NoSocket()
+        capture.control_socket = _NoSocket()
+        return capture
+
+    def test_fresh_ptp_sample_maps_to_lidar_ptp_utc(self):
+        capture = self._capture_with_source({
+            'timestamp_ns': 1_700_000_000_000_000_000,
+            'source': 'livox_ptp', 'clock_domain': 'lidar_ptp_utc',
+            'synchronized': True, 'time_type': 1, 'lidar_source': 'ptp',
+            'arrival_age_s': 0.0,
+        })
+        snap = capture.timing_snapshot()
+        self.assertEqual(snap['clock_domain'], 'lidar_ptp_utc')
+        self.assertEqual(snap['source'], 'livox_ptp')
+        self.assertTrue(snap['synchronized'])
+
+    def test_stale_ptp_sample_maps_to_orin_realtime_not_ptp(self):
+        # This is the contradiction the single-snapshot design removes: a stale
+        # absolute sample falls back to host time, so the clock domain must be
+        # host, and the label must not say ptp.
+        capture = self._capture_with_source({
+            'timestamp_ns': 1_800_000_000_000_000_000,
+            'source': 'host_arrival', 'clock_domain': 'orin_realtime',
+            'synchronized': False, 'time_type': 1, 'lidar_source': 'ptp',
+            'arrival_age_s': 5.0,
+        })
+        snap = capture.timing_snapshot()
+        self.assertEqual(snap['clock_domain'], 'orin_realtime')
+        self.assertEqual(snap['source'], 'host_arrival')
+        self.assertFalse(snap['synchronized'])
+        # The device time_type may still read ptp; the point is that the VALUE is
+        # host time, so it is not published as synchronized.
+        self.assertEqual(snap['time_type'], 1)
+
+    def test_unsynchronized_source_maps_to_orin_realtime(self):
+        capture = self._capture_with_source({
+            'timestamp_ns': 1_800_000_000_000_000_000,
+            'source': 'host_arrival', 'clock_domain': 'orin_realtime',
+            'synchronized': False, 'time_type': 0, 'lidar_source': 'device_uptime',
+            'arrival_age_s': 0.01,
+        })
+        snap = capture.timing_snapshot()
+        self.assertEqual(snap['clock_domain'], 'orin_realtime')
+        self.assertFalse(snap['synchronized'])
+        self.assertEqual(snap['time_type'], 0)
+
+    def test_synthetic_mode_is_host_time(self):
+        capture = LidarCapture.__new__(LidarCapture)
+        capture.sdk_mode = 'synthetic'
+        capture._source = None
+        snap = capture.timing_snapshot()
+        self.assertEqual(snap['clock_domain'], 'orin_realtime')
+        self.assertEqual(snap['source'], 'host_arrival')
+        self.assertFalse(snap['synchronized'])
+        self.assertEqual(snap['lidar_source'], 'simulation')
+
+
 if __name__ == '__main__':
     unittest.main()

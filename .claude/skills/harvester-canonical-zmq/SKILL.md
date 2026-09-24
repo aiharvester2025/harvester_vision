@@ -57,9 +57,12 @@ Hard rules (never violate):
 | `canonical_zmq/canonical_zmq_publisher/ingest.py` | `SyntheticSource` — emits every dashboard channel for no-hardware validation. |
 | `canonical_zmq/canonical_zmq_publisher/oak_capture.py` | `OakCapture` — OAK RGB/depth/camera_info/imu adapter (the model for a new adapter). |
 | `canonical_zmq/canonical_zmq_publisher/range_ingest.py` | `RangeIngest` — Pi PLC stream → `v1/range/docking` + `v1/boom/state` + `v1/docking/trunk_estimate`. |
+| `canonical_zmq/canonical_zmq_publisher/lidar_capture.py` | `LidarCapture` — MID-360 adapter; `timing_snapshot()` picks acquisition time + provenance. |
 | `canonical_zmq/canonical_zmq_publisher/recording.py` | `PacketRecorder`, `load_recording`, `iter_recordings`. |
 | `canonical_zmq/canonical_zmq_publisher/replay.py` | Replays a recorded directory on a PUB (default `tcp://*:5591`, avoids live `5590`). |
-| `canonical_zmq/test/` | `test_protocol.py`, `test_aggregator.py`, `test_oak_capture.py`, `test_range_ingest.py`. |
+| `canonical_zmq/test/` | `test_protocol.py`, `test_aggregator.py`, `test_oak_capture.py`, `test_lidar_capture.py`, `test_range_ingest.py`. |
+| `lidar/livox_source.py` | Livox-SDK2 adapter; `decode_packet_time`, `timing_snapshot`, `timestamp_status`. |
+| `deploy/ptp/`, `deploy/systemd/ptp4l-master@.service` | Orin-as-PTP-master for the LiDAR (verified working). |
 
 ## Canonical channels (frozen list)
 
@@ -84,7 +87,14 @@ Codec rules enforced by `validate_header`:
   everything else (incl. `v1/boom/state`, `v1/docking/trunk_estimate`) → `json`.
 - Every channel except `v1/system/status` requires a non-empty `frame_id`; `capabilities` must be a
   non-empty dict of `str -> bool`; `source_mode` ∈ `{simulation, hardware}`; `clock_domain` ∈
-  `{ros_sim_time, utc_host, plc_rtc_utc}`; `schema_version == 1`.
+  `{ros_sim_time, utc_host, plc_rtc_utc, orin_realtime, lidar_ptp_utc}`; `schema_version == 1`.
+  `orin_realtime` = this Orin's `CLOCK_REALTIME` (used when a sensor has no absolute clock of its
+  own); `lidar_ptp_utc` = the LiDAR's own PTP/GPS-synchronized timestamp. **Caveat: the MID-360
+  has NO UTC clock by default** — its timestamps are boot-relative until it slaves to a PTP master
+  on the sensor NIC (`deploy/ptp/`). Never label a boot-relative counter `plc_rtc_utc`.
+  `validate_header` ignores unknown extra fields, so adapters may add provenance fields (e.g.
+  `timestamp_source`, `lidar_time_sync`, `lidar_time_type`, `lidar_time_source`) without a contract
+  change; only the fields in `_GLOBAL_FIELDS` are required and type-checked.
 
 The required header fields (`_GLOBAL_FIELDS`): `schema_version`, `source_mode`, `source_id`,
 `sequence`, `frame_id`, `acquisition_timestamp_ns`, `clock_domain`, `gateway_monotonic_ns`,
@@ -181,3 +191,11 @@ For a live adapter, run the aggregator with `--ingest tcp://*:5570`, run the ada
 - Keep mapping logic pure and socket logic separate so tests never need a live ZMQ peer.
 - Never weaken the observation-only safety boundary.
 - Replay binds a **separate** PUB (`tcp://*:5591` by default) so it never collides with live `5590`.
+- **Timestamps must state their real clock domain.** The MID-360 especially: it has no UTC clock of
+  its own (`time_type==0` = ns since power-on), so label it `orin_realtime` (host arrival) or
+  `lidar_ptp_utc` (PTP/GPS-synced device time), never `plc_rtc_utc`. The Orin is the PTP master for
+  the LiDAR (`deploy/ptp/`, `ptp4l-master@eth1.service`; verified working, `time_type=1`).
+  **Stamp a scan from ONE `timing_snapshot()` call** (source) / `capture.timing_snapshot()` — it
+  returns the timestamp and its provenance together. Reading the timestamp and the status from two
+  separate calls can label a stale host-clock value `lidar_ptp_utc`. See the README "MID-360 LiDAR
+  time synchronization" section.

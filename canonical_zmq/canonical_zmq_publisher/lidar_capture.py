@@ -69,24 +69,32 @@ DEFAULT_FRAME_ID = 'mid360_link'
 
 
 def build_lidar_header(frame_id, point_count, acquisition_timestamp_ns,
-                       capabilities=None, source_mode='hardware'):
+                       capabilities=None, source_mode='hardware',
+                       clock_domain='plc_rtc_utc', timestamp_source=None):
     """Return a canonical header for a ``v1/lidar/raw`` packet.
 
     ``source_mode`` must reflect the real provenance: ``simulation`` for the
     synthetic generator, ``hardware`` for the real MID-360. Mislabelling
     synthetic data as hardware would make a remote operator believe the sensor
     is live.
+
+    ``clock_domain`` and ``timestamp_source`` describe WHICH clock
+    ``acquisition_timestamp_ns`` is expressed in and how it was obtained. They
+    default to the frozen contract values (``plc_rtc_utc`` / unset) so existing
+    callers are unaffected, but the LiDAR path passes the real values because a
+    MID-360 that is not PTP/GPS-synchronized has no UTC clock at all: labelling
+    its boot-relative counter ``plc_rtc_utc`` would be a lie that looks correct.
     """
     if source_mode not in ('hardware', 'simulation'):
         raise ValueError('unsupported source_mode {!r}'.format(source_mode))
-    return {
+    header = {
         'schema_version': 1,
         'source_mode': source_mode,
         'source_id': 'orin',
         'sequence': 0,  # owned by the aggregator
         'frame_id': frame_id,
         'acquisition_timestamp_ns': acquisition_timestamp_ns,
-        'clock_domain': 'plc_rtc_utc',
+        'clock_domain': clock_domain,
         'gateway_monotonic_ns': 0,  # owned by the aggregator
         'calibration_id': 'mid360_v0',
         'capabilities': capabilities or {
@@ -100,6 +108,10 @@ def build_lidar_header(frame_id, point_count, acquisition_timestamp_ns,
         'point_stride_bytes': POINT_STRIDE_BYTES,
         'point_fields': [dict(field) for field in POINT_FIELDS],
     }
+    if timestamp_source is not None:
+        header['timestamp_source'] = timestamp_source
+    return header
+
 
 
 def pack_points(points: Sequence[Sequence[float]]) -> bytes:
@@ -310,22 +322,54 @@ class LidarCapture:
         return downsample(points, self.max_points)
 
     # ------------------------------------------------------------------ publish
+    def timing_snapshot(self):
+        """Return one consistent timing snapshot for a scan.
+
+        Synthetic mode has no device, so it is host time by construction. The
+        LiDAR path delegates to the source's ``timing_snapshot``, which returns
+        the chosen timestamp and the status describing it in a single read. That
+        matters: taking the timestamp and the status from two separate calls
+        could label a stale/host-clock value as ``lidar_ptp_utc``.
+        """
+        if self.sdk_mode != 'livox-sdk' or self._source is None:
+            return {
+                'timestamp_ns': time.time_ns(),
+                'source': 'host_arrival',
+                'clock_domain': 'orin_realtime',
+                'synchronized': False,
+                'time_type': None,
+                'lidar_source': 'simulation',
+                'arrival_age_s': None,
+            }
+        return self._source.timing_snapshot()
+
     def emit(self, points):
         quality, _offset = self.chrony.get()
         source_mode = 'hardware' if self.sdk_mode == 'livox-sdk' else 'simulation'
+        # One snapshot drives BOTH the timestamp and its provenance, so the
+        # header can never say "PTP" over a host-clock value.
+        timing = self.timing_snapshot()
         header = build_lidar_header(
-            self.frame_id, len(points), time.time_ns(), source_mode=source_mode)
-        header['timestamp_source'] = (
-            'plc_rtc_ntp' if quality == 'synchronized' else 'monotonic')
+            self.frame_id, len(points), timing['timestamp_ns'],
+            source_mode=source_mode, clock_domain=timing['clock_domain'],
+            timestamp_source=timing['source'])
+        # ``time_quality`` reflects the Orin's chrony state (is the HOST clock
+        # disciplined by the PLC RTC?), while ``lidar_time_sync`` states whether
+        # the SENSOR clock is absolute. Both matter and they are independent: a
+        # host can be synced while the LiDAR is not, and vice versa.
         header['time_authority'] = TIME_AUTHORITY
         header['time_quality'] = quality
         header['level_source'] = self.level_source
+        header['lidar_time_sync'] = bool(timing['synchronized'])
+        header['lidar_time_type'] = timing['time_type']
+        header['lidar_time_source'] = timing['lidar_source']
         try:
             frames = pack_message(self.channel, header, pack_points(points))
         except Exception as error:  # ProtocolError -> drop, do not crash
             print('[{}] rejected lidar packet: {}'.format(self.channel, error))
             return
         self.push_socket.send_multipart(frames)
+
 
     def run(self):
         period_s = 1.0 / self.hz
@@ -335,6 +379,9 @@ class LidarCapture:
             self.sdk_mode, self.sector_deg, self.max_points))
         print('[{}] State: {}'.format(
             self.channel, 'ENABLED' if self.enabled else 'DISABLED'))
+        print('[{}] timing: acquisition time is the LiDAR PTP/GPS timestamp when '
+              'the sensor is synchronized, otherwise the Orin receive clock '
+              '({})'.format(self.channel, 'chrony ' + self.chrony.get()[0]))
         # Turn SIGTERM into KeyboardInterrupt so stop_all.sh (plain `kill`) still
         # runs the finally block below. Without this the motor-stop in
         # close() would only ever run on Ctrl-C, leaving the LiDAR spinning

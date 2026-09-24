@@ -80,6 +80,59 @@ class ProtocolTest(unittest.TestCase):
         self.assertEqual(channel, 'v1/boom/state')
         self.assertEqual(out, payload)
 
+    def test_lidar_accepts_realtime_and_ptp_clock_domains(self):
+        # The MID-360 has no UTC clock of its own, so the LiDAR adapter must be
+        # able to label a scan with the Orin receive clock ('orin_realtime') or
+        # with the LiDAR's own PTP/GPS time ('lidar_ptp_utc') without the frozen
+        # contract rejecting it.
+        for domain in ('orin_realtime', 'lidar_ptp_utc'):
+            header = {
+                'schema_version': 1,
+                'source_mode': 'hardware',
+                'source_id': 'orin',
+                'sequence': 1,
+                'frame_id': 'mid360_link',
+                'acquisition_timestamp_ns': 1700000000000000000,
+                'clock_domain': domain,
+                'gateway_monotonic_ns': 2,
+                'calibration_id': 'mid360_v0',
+                'capabilities': {'lidar.raw_xyz': True},
+                'codec': 'lidar_xyz_f32',
+                'point_count': 1,
+                'point_stride_bytes': 12,
+                'point_fields': [{'name': 'x', 'type': 'float32'}],
+                # Provenance extras must survive validation rather than being
+                # stripped: the dashboard needs them to label the clock honestly.
+                'timestamp_source': 'host_arrival',
+                'lidar_time_sync': False,
+                'lidar_time_type': 0,
+            }
+            frames = pack_message('v1/lidar/raw', header, b'\0' * 12)
+            _channel, out, _payload = unpack_message(frames)
+            self.assertEqual(out['clock_domain'], domain)
+            self.assertIn('lidar_time_sync', out)
+
+    def test_rejects_unknown_clock_domain(self):
+        header = {
+            'schema_version': 1,
+            'source_mode': 'hardware',
+            'source_id': 'orin',
+            'sequence': 1,
+            'frame_id': 'mid360_link',
+            'acquisition_timestamp_ns': 1,
+            'clock_domain': 'not_a_clock',
+            'gateway_monotonic_ns': 2,
+            'calibration_id': 'mid360_v0',
+            'capabilities': {'lidar.raw_xyz': True},
+            'codec': 'lidar_xyz_f32',
+            'point_count': 1,
+            'point_stride_bytes': 12,
+            'point_fields': [{'name': 'x', 'type': 'float32'}],
+        }
+        with self.assertRaises(ProtocolError):
+            pack_message('v1/lidar/raw', header, b'\0' * 12)
+
+
 
 if __name__ == '__main__':
     unittest.main()

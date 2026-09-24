@@ -352,8 +352,42 @@ bind the canonical `5590` themselves.
   (`v1/camera/<name>/imu`, `json`) for point-cloud vibration compensation.
   Launched by `run_all.sh` (default `CODEC=h265`, depth + imu on; `DEPTH=0`
   disables depth, `IMU=0` disables the IMU stream).
-- `lidar_ingest` — **deferred** (MID-360 UDP, XYZ, `v1/lidar/raw`). See
+- `lidar_capture` — **implemented**. Reads the MID-360 through Livox-SDK2
+  (`lidar/livox_source.py`), levels to gravity, clips to a forward sector and
+  range, and PUSHes `v1/lidar/raw` (`lidar_xyz_f32`). Starts idle and is enabled
+  over a PULL control socket (`{"enabled": true}`). Launched by `run_all.sh`
+  (`LIDAR=1` default, `LIDAR_MODE=livox-sdk` for the real sensor). See
   `.kilo/plans/mid360-lidar-integration.md`.
+
+### LiDAR timestamp provenance (`v1/lidar/raw`)
+
+The MID-360 has **no UTC clock of its own**: its packet timestamps are
+nanoseconds since power-on until it is slaved to a PTP/gPTP master (or GPS). The
+LiDAR is always the PTP *slave*, so the Orin is the master
+(`deploy/ptp/`, `deploy/systemd/ptp4l-master@.service`). **Verified working on
+the deployment Orin NX**: `ptp4l` is grandmaster on `eth1` and the MID-360
+reports `time_type=1`; measured LiDAR↔Orin agreement is ~1–2 ms (σ ≈ 0.5 ms,
+software timestamping).
+
+`lidar_capture` decodes the per-packet `time_type` and never mislabels the
+origin. It stamps each scan from a single `timing_snapshot()` call that returns
+the chosen time **and** its provenance together, so the header can never pair a
+host-clock value with a PTP label (two separate reads could disagree on a stale
+sample). Cases:
+
+| Condition | `clock_domain` | `timestamp_source` |
+|---|---|---|
+| `time_type` 1/2 **and** sample fresh | `lidar_ptp_utc` | `livox_ptp` / `livox_gps` |
+| not synchronized, or absolute sample stale | `orin_realtime` | `host_arrival` |
+| no packet ever arrived | `orin_realtime` | `host_now` |
+
+Extra header fields `lidar_time_sync`, `lidar_time_type`, and `lidar_time_source`
+state the raw device state (`ptp`/`gps`/`device_uptime`/`unknown`/`no_data`).
+`lidar_time_sync` is true only for the first row — a stale absolute sample is
+published as host time with `lidar_time_sync=false`, even though the device's
+`time_type` may still read 1. The contract's `clock_domain` allowlist includes
+both new domains.
+
 - `range_ingest` — **retained but not launched by default**. Subscribes to the
   Pi PLC's single-part JSON stream (`tcp://192.168.50.40:5555`, topic
   `harvester.sensors.v1`) and PUSHes canonical packets for
