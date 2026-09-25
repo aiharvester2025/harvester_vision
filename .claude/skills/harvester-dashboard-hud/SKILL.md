@@ -191,7 +191,7 @@ Buffering **every** digit would add an 800 ms delay to all primary controls — 
 Full key map (render-only unless noted): `1` cutter view / toggle Cutter Range
 HUD, `2` toggle Boom+Docking HUDs (on cutter: back to docking + show them), `3`
 operator HUD, `4` LiDAR scan overlay (full-screen, hidden by default), `5` LiDAR
-view cycle (opens in the **front (x-z)** working view; cycles
+view cycle (opens in the **front (y-z)** working view; cycles
 front → left → right → iso → camera → top, and includes the `camera` overlay
 view), `6` point cloud, `7` IMU
 stabilization A/B (covers **both** the OAK cloud and the MID-360 cloud), `0`/`Esc`
@@ -248,7 +248,11 @@ same "never a false green" rule the docking guidance uses).
     ~100-150 trunk clutter; a sparse 5-step sweep is far lower).
   - **Frame matters:** the live MID-360 cloud is sensor-origin, the recorded
     Gazebo cloud is `frame_id: world`; the bridge picks `frame` from the packet
-    header so height is absolute in both.
+    header.  In the sensor frame with no `ground_z` the ground is ESTIMATED (a
+    low percentile) and the height bands are re-anchored to it; the absolute
+    tree height is only trusted (`ground_known`) when the cloud actually
+    contains a dense low ground band, otherwise the height row renders as
+    reduced-confidence rather than presenting a plausible-but-unanchored number.
   - **`d_horiz` is derived from the scanned trunk axis** when no explicit
     distance is given, so a LiDAR-only scan needs no camera channel.  It is
     boom-pivot-relative: `d_horiz = hypot(axis - (base_x + BOOM_PIVOT_BASE_X_OFFSET_M))`
@@ -279,6 +283,12 @@ same "never a false green" rule the docking guidance uses).
   the cloud is shown raw and `bridge.lidarImuMotion` is set so the overlay's IMU
   line reads "motion — stab withheld" instead of silently distorting the view.
   Real hydraulic vibration is a few degrees, so it stays inside the band.
+
+  **The reference RE-BASES when the tilt leaves the band**, so a big boom/body
+  swing does not leave stabilization permanently withheld (holding the old
+  reference would make every later sample look like motion).  A scan also clears
+  the reference and the motion flag on `begin_scan`, so a scan never inherits a
+  withheld state from the previous one.
 - ADVISORY ONLY: the estimate is geometry from one scan, not a measured contact.
   The overlay must always show the advisory line; the five measured range sensors
   remain the authoritative docking guard. The camera↔LiDAR extrinsic is

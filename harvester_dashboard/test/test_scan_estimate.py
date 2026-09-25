@@ -157,6 +157,37 @@ class EstimateTreeHeightTest(unittest.TestCase):
         self.assertTrue(est.valid)
         self.assertAlmostEqual(est.tree_height_m, 12.0, delta=0.15)
 
+    def test_sensor_frame_reanchors_the_bands_to_local_ground(self):
+        # A sensor-frame cloud with NO ground_z: the world-anchored 1-8 m axis
+        # band would miss the trunk, so the bands are re-anchored to the local
+        # ground.  The height is ground-relative and therefore flagged with
+        # ground_known=False (the absolute value carries the ground estimate's
+        # error), but the trunk axis must still be recovered correctly.
+        cloud = _synthetic_tree(trunk_top_z=12.0, ground=-1.8)
+        est = estimate_tree_height(cloud, frame='sensor')
+        self.assertTrue(est.valid, est.reason)
+        self.assertFalse(est.ground_known)
+        self.assertAlmostEqual(est.trunk_axis_xy[0], 0.0, delta=0.2)
+        # The tree-height row is reduced-confidence without a ground datum.
+        rows = {r['key']: r for r in est.to_rows()}
+        self.assertFalse(rows['tree_height']['valid'])
+
+    def test_sensor_frame_with_ground_is_trusted(self):
+        # A live MID-360 sees the ground around the machine, so a sensor-frame
+        # cloud that CONTAINS ground returns yields a trusted absolute height.
+        rng = np.random.default_rng(1)
+        ground = np.column_stack([
+            rng.uniform(-6.0, 6.0, 4000), rng.uniform(-6.0, 6.0, 4000),
+            rng.normal(-1.8, 0.02, 4000)])
+        cloud = np.vstack([_synthetic_tree(trunk_top_z=12.0, ground=-1.8),
+                           ground])
+        est = estimate_tree_height(cloud, frame='sensor')
+        self.assertTrue(est.valid)
+        self.assertTrue(est.ground_known)
+        self.assertAlmostEqual(est.tree_height_m, 12.0, delta=0.3)
+        rows = {r['key']: r for r in est.to_rows()}
+        self.assertTrue(rows['tree_height']['valid'])
+
     def test_small_cloud_is_invalid(self):
         est = estimate_tree_height(np.zeros((5, 3)), frame='world')
         self.assertFalse(est.valid)

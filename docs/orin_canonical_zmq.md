@@ -138,7 +138,7 @@ DISPLAY=:1 PYTHONPATH=harvester_dashboard /usr/bin/python3 \
 Controls: `1` cutter view / toggle the Cutter Range HUD, `2` toggle the Boom +
 Docking HUDs (on the cutter view it returns to the docking camera and shows
 them), `3` operator sensor HUD, `4` full-screen LiDAR scan overlay, `5` LiDAR
-projection (opens in the **front (x-z)** working view; cycles
+projection (opens in the **front (y-z)** working view; cycles
 front → left → right → iso → camera → top, and includes the `camera` overlay
 view), `6` camera point-cloud inset,
 `7` IMU stabilization A/B (covers both the OAK and MID-360 clouds), `0`/`Esc`
@@ -518,8 +518,11 @@ the scene (the Gazebo recordings' IMU is pure attitude and swings to ~60° pitch
 which folds a 9 m trunk to ~4 m).  Outside the band the cloud is shown raw and
 `bridge.lidarImuMotion` is set, so the HUD reports "motion — stab withheld"
 rather than silently distorting the view.  Real hydraulic vibration is a few
-degrees, so it stays inside the band.  This is why the recorded replay looks
-correct without the operator having to press `7`.
+degrees, so it stays inside the band.  The reference RE-BASES when the tilt
+leaves the band, so one big swing does not leave stabilization permanently
+withheld, and `begin_scan` clears the reference so a scan never inherits a
+withheld state.  This is why the recorded replay looks correct without the
+operator having to press `7`.
 
 ### LiDAR timestamp provenance (`v1/lidar/raw`)
 

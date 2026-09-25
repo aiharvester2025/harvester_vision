@@ -381,7 +381,7 @@ if _QT_AVAILABLE:
         def _get_lidar_view_label(self) -> str:
             return {
                 'top': 'top-down (x-y)',
-                'front': 'front (x-z)',
+                'front': 'front (y-z)',   # front plots y across, z up
                 'left': 'left (y-z)',
                 'right': 'right (y-z)',
                 'iso': 'isometric',
@@ -490,6 +490,7 @@ if _QT_AVAILABLE:
                 return
             from .decoders.livox_imu import (
                 quaternion_to_rpy, sensor_rpy_to_optical)
+            from .decoders.imustab import within_vibration_band
             attitude_rpy = decoded.get('attitude_rpy_rad')
             if attitude_rpy is None:
                 # ROS-style recording: derive roll/pitch from the quaternion.
@@ -507,10 +508,20 @@ if _QT_AVAILABLE:
                 if delta < self._IMU_ATTITUDE_EPSILON:
                     return
             self._lidar_imu_attitude = attitude
-            # Latch the reference on first sample so stabilization removes
-            # vibration *relative to* the current (possibly tilted) pose.
-            if self._lidar_imu_reference is None:
+            reference = self._lidar_imu_reference
+            self._lidar_imu_motion = False
+            if reference is None:
+                # Latch the reference on the first sample so stabilization
+                # removes vibration *relative to* the current pose.
                 self._lidar_imu_reference = attitude
+            elif not within_vibration_band(attitude, reference):
+                # The tilt left the vibration band: this is machine motion, so
+                # RE-BASE the reference onto the new pose.  Holding the old
+                # reference would make every later sample look like motion and
+                # leave stabilization permanently withheld after one big swing.
+                # Flag this sample so the operator sees WHY it was not applied.
+                self._lidar_imu_reference = attitude
+                self._lidar_imu_motion = True
             self.lidar_imu_changed.emit()
             self._apply_lidar_stabilization()
 
@@ -571,7 +582,6 @@ if _QT_AVAILABLE:
             raw = self._lidar_raw_points
             attitude = self._lidar_imu_attitude
             reference = self._lidar_imu_reference
-            self._lidar_imu_motion = False
             if (self._imu_enabled and raw and attitude is not None
                     and reference is not None):
                 try:
@@ -583,7 +593,8 @@ if _QT_AVAILABLE:
                             attitude, reference)
                         self._lidar_points = stabilized.tolist()
                     else:
-                        # Machine motion, not vibration: do not rotate.
+                        # Machine motion, not vibration: do not rotate.  (The
+                        # caller may already have flagged it while re-basing.)
                         self._lidar_imu_motion = True
                         self._lidar_points = list(raw)
                 except Exception:
@@ -1849,6 +1860,11 @@ if _QT_AVAILABLE:
             self._scan_reason = ''
             self._scan_estimate_rows_cache = []
             self._scan_accumulated = []
+            # Re-base stabilization for the new scan: clear the motion flag and
+            # re-latch the reference on the next IMU sample, so a scan never
+            # inherits a withheld/biased state from the previous one.
+            self._lidar_imu_reference = None
+            self._lidar_imu_motion = False
             self._lidar_set_enabled(True)
             self._scan_changed_emit()
 

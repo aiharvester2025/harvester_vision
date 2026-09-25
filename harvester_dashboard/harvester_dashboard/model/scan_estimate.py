@@ -32,7 +32,7 @@ module writes to a socket or commands motion.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import List, Optional, Sequence
 
 import numpy as np
@@ -118,6 +118,12 @@ class ScanEstimateConfig:
     # confident-looking number computed from a handful of stray returns.
     min_trunk_points: int = 30
     min_cloud_points: int = 200
+    # Low percentile used as the ground estimate when the caller gives no ground
+    # datum (sensor frame).  Robust to stray points below the ground.
+    ground_percentile: float = 1.0
+    # Fraction of returns that must sit in a +-0.15 m band about the estimated
+    # ground for the ground (and hence the absolute height) to be trusted.
+    ground_band_fraction: float = 0.05
     # Docking range sensor -> trunk-centreline datum used for ``d_horiz`` when
     # the caller supplies no explicit horizontal distance.
     default_horizontal_distance_m: Optional[float] = None
@@ -138,6 +144,9 @@ class TreeEstimate:
     crown_base_method: str = ''
     trunk_end_valid: bool = False
     trunk_end_reason: str = ''
+    # False when the height is relative to an ESTIMATED ground (sensor frame
+    # with no ground_z), so the absolute tree height carries that error.
+    ground_known: bool = True
     trunk_axis_xy: Optional[tuple] = None
     uncertainty_m: Optional[float] = None
     trunk_point_count: int = 0
@@ -154,10 +163,15 @@ class TreeEstimate:
                 return '—'
 
         return [
+            # The tree height is only as good as the ground reference: with no
+            # datum (sensor frame, no ground_z) it is ground-relative, so mark
+            # the row reduced-confidence rather than presenting it as absolute.
             {'key': 'tree_height', 'label': 'Tree Height', 'group': 'tree',
-             'value': _m(self.tree_height_m), 'valid': self.valid},
+             'value': _m(self.tree_height_m),
+             'valid': self.valid and self.ground_known},
             {'key': 'trunk_top', 'label': 'Trunk Top', 'group': 'tree',
-             'value': _m(self.trunk_top_m), 'valid': self.valid},
+             'value': _m(self.trunk_top_m),
+             'valid': self.valid and self.ground_known},
             # A crown base from the unsafe fallback is flagged invalid so the
             # operator does not dock on it.
             {'key': 'crown_base', 'label': 'Crown Base', 'group': 'tree',
@@ -239,7 +253,6 @@ def estimate_trunk_axis(cloud: np.ndarray, cfg: ScanEstimateConfig):
     points between ``axis_band_m`` in height.  Returns ``(x, y, band_count)``
     or ``(None, None, 0)`` when the band holds too few points.
     """
-    z = cloud[:, 2]
     low, high = cfg.axis_band_m
     dx = cloud[:, 0]
     dy = cloud[:, 1]
@@ -362,13 +375,36 @@ def estimate_tree_height(points, cfg: Optional[ScanEstimateConfig] = None,
     # Work in a ground-referenced copy for the height comparisons.
     if frame == 'world':
         datum = 0.0
+        ground_relative = True
+        ground_known = True
     elif ground_z is not None:
         datum = float(ground_z)
+        ground_relative = True
+        ground_known = True
     else:
-        # Sensor frame with no ground datum: assume the lowest point is ground.
-        datum = float(np.min(cloud[:, 2]))
+        # Sensor frame with no explicit ground datum.  Estimate the ground from
+        # a LOW PERCENTILE of z (robust to a stray return below ground) and mark
+        # the height ground-relative.  Whether that estimate is trustworthy
+        # depends on the cloud actually CONTAINING ground: a live MID-360 sees
+        # the ground around the machine, while a tree-only cloud (or the Gazebo
+        # recording's world frame) may not.  Detect a dense low band and only
+        # then treat the ground as known.
+        datum = float(np.percentile(cloud[:, 2], cfg.ground_percentile))
+        ground_relative = False
+        band = (cloud[:, 2] >= datum - 0.15) & (cloud[:, 2] <= datum + 0.15)
+        # A real ground plane puts a good fraction of returns in the low band.
+        ground_known = (band.sum() / max(1, cloud.shape[0])) >= cfg.ground_band_fraction
     cloud = cloud.copy()
     cloud[:, 2] = cloud[:, 2] - datum
+
+    if not ground_relative:
+        # Re-anchor the ground-relative bands to the local ground (z=0 here).
+        z_span = float(cloud[:, 2].max())
+        axis_low = 1.0
+        axis_high = min(8.0, max(axis_low + 1.0, z_span - 4.0))
+        crown_min = min(cfg.crown_z_min_m, max(axis_high + 0.5, z_span - 4.5))
+        cfg = replace(cfg, axis_band_m=(axis_low, axis_high),
+                      crown_z_min_m=crown_min)
 
     axis_x, axis_y, band_count = estimate_trunk_axis(cloud, cfg)
     if axis_x is None:
@@ -413,6 +449,7 @@ def estimate_tree_height(points, cfg: Optional[ScanEstimateConfig] = None,
         crown_base_method=base_method,
         trunk_end_valid=trunk_end_valid,
         trunk_end_reason=trunk_end_reason,
+        ground_known=ground_known,
         trunk_axis_xy=(axis_x, axis_y),
         uncertainty_m=uncertainty,
         trunk_point_count=trunk_count,
@@ -626,11 +663,9 @@ def plan_scan(points, horizontal_distance_m: Optional[float] = None,
     distance = horizontal_distance_m
     if distance is None and derive_distance_from_axis:
         distance = trunk_horizontal_distance(tree.trunk_axis_xy, base_x_m)
-    if distance is not None and cfg.default_horizontal_distance_m is None:
-        cfg = ScanEstimateConfig(
-            **{**cfg.__dict__, 'default_horizontal_distance_m': distance})
-    # Dock at the crown base (trunk-end), passing its validity through so the
-    # target refuses the unsafe fallback rather than docking inside the canopy.
+    # Pass the resolved distance explicitly; do not mutate the caller's config
+    # (dataclasses.replace keeps the frozen dataclass contract rather than
+    # poking __dict__).
     target = solve_boom_target(
         tree.tree_height_m, distance, cfg,
         crown_base_m=tree.crown_base_m, trunk_end_valid=tree.trunk_end_valid)

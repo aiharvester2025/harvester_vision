@@ -170,8 +170,10 @@ Item {
     // cloud above the bottom strip stays fully visible.
     readonly property real card_bottom_margin: layout ? layout.marginPx : 12
     readonly property real card_gap: 8
+    // Let the cards shrink with the window rather than forcing a minimum that
+    // would spill three cards past the edge on a narrow display.
     readonly property real card_width: Math.max(
-        180, (width - 2 * card_bottom_margin - 2 * card_gap) / 3)
+        1, (width - 2 * card_bottom_margin - 2 * card_gap) / 3)
 
     // (1) Scan state / guidance, bottom-left.
     Rectangle {

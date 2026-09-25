@@ -224,9 +224,10 @@ class GuiSmokeTest(unittest.TestCase):
             self.bridge.cycle_lidar_view()
             self.app.processEvents()
             self.assertEqual(self.bridge.lidarView, name)
-        # Label tracks the mode.
+        # Label tracks the mode.  `front` plots y across and z up, so its label
+        # is (y-z), matching projection.VIEW_LABELS.
         self.assertEqual(self.bridge.lidarView, 'front')
-        self.assertEqual(self.bridge.lidarViewLabel, 'front (x-z)')
+        self.assertEqual(self.bridge.lidarViewLabel, 'front (y-z)')
         # Reset to front for other tests.
         self.assertEqual(self.bridge.lidarView, 'front')
 

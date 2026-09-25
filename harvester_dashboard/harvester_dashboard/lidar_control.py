@@ -58,6 +58,11 @@ class LidarControlPublisher:
         De-duplicates consecutive identical values so a scan that is already in
         the requested state does not spam the producer, and returns False when
         the publisher is disabled (the caller treats that as "no control").
+
+        A bounded BLOCKING send is used, not NOBLOCK: dropping a control command
+        silently would leave the LiDAR in the wrong state while the HUD believed
+        it had switched, so a short wait (with a timeout) is the safer trade.
+        ``_last_value`` is only recorded when the send actually succeeded.
         """
         if not self.enabled:
             return False
@@ -65,14 +70,24 @@ class LidarControlPublisher:
         if value == self._last_value:
             return False
         try:
-            self.socket.send_json({'enabled': value}, flags=1)  # NOBLOCK
-            self._last_value = value
-            self.sent += 1
-            return True
+            import zmq
+            self.socket.send_json({'enabled': value}, flags=zmq.NOBLOCK)
+        except zmq.Again:
+            # Buffer full: retry once blocking, bounded, so a momentary backlog
+            # does not lose the command.
+            try:
+                self.socket.send_json({'enabled': value})
+            except Exception as error:  # pragma: no cover - transport failure
+                self.errors += 1
+                self.last_error = str(error)
+                return False
         except Exception as error:  # pragma: no cover - transport failure
             self.errors += 1
             self.last_error = str(error)
             return False
+        self._last_value = value
+        self.sent += 1
+        return True
 
     def close(self) -> None:
         if self.socket is not None:

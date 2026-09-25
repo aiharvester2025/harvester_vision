@@ -482,6 +482,35 @@ class NoEmitProofTest(unittest.TestCase):
         # The cloud is NOT rotated: the 9 m point stays at 9 m.
         self.assertAlmostEqual(bridge.lidarPoints[0][2], 9.0, delta=0.01)
 
+    def test_stabilization_recovers_after_machine_motion(self):
+        # After a big swing the reference must RE-BASE, otherwise every later
+        # sample looks like motion and stabilization stays off forever.
+        try:
+            import PySide2  # noqa: F401
+        except ImportError:
+            self.skipTest('PySide2 unavailable')
+        import math
+        app, model, bridge = self._scan_bridge()
+        import numpy as np
+        pts = np.array([[8.5, 0.0, 9.0]], dtype='<f4')
+        bridge.on_frame_decoded('v1/lidar/raw', pts)
+        self._ingest_lidar_json(model, {
+            'orientation': {'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 1.0}})
+        app.processEvents()
+        a = math.radians(60.0)     # big swing: motion, reference re-bases
+        self._ingest_lidar_json(model, {
+            'orientation': {'x': 0.0, 'y': math.sin(a / 2), 'z': 0.0,
+                            'w': math.cos(a / 2)}})
+        app.processEvents()
+        self.assertTrue(bridge.lidarImuMotion)
+        # A small wobble about the NEW pose is vibration again -> recovered.
+        b = math.radians(63.0)
+        self._ingest_lidar_json(model, {
+            'orientation': {'x': 0.0, 'y': math.sin(b / 2), 'z': 0.0,
+                            'w': math.cos(b / 2)}})
+        app.processEvents()
+        self.assertFalse(bridge.lidarImuMotion)
+
     def test_small_imu_tilt_stabilizes(self):
         try:
             import PySide2  # noqa: F401

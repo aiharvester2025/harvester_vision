@@ -57,6 +57,34 @@ class PayloadTest(unittest.TestCase):
         publisher.set_enabled(False)
         self.assertEqual(len(sent), 2)
 
+    def test_failed_send_does_not_record_the_value(self):
+        # A dropped command must NOT be remembered as sent, or the HUD would
+        # believe the LiDAR switched while it had not.
+        publisher = LidarControlPublisher('')
+        attempts = []
+
+        class _Socket:
+            def __init__(self):
+                self.fail = True
+
+            def send_json(self, payload, flags=0):
+                attempts.append(payload)
+                if self.fail:
+                    raise RuntimeError('boom')
+
+            def close(self, linger=0):
+                pass
+
+        publisher.socket = _Socket()
+        self.assertFalse(publisher.set_enabled(True))
+        self.assertIsNone(publisher._last_value)
+        self.assertEqual(publisher.errors, 1)
+        # Once the transport recovers the retry actually sends.
+        publisher.socket.fail = False
+        self.assertTrue(publisher.set_enabled(True))
+        self.assertTrue(publisher._last_value)
+        self.assertEqual(publisher.sent, 1)
+
 
 if __name__ == '__main__':
     unittest.main()
