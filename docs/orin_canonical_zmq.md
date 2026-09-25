@@ -214,7 +214,9 @@ The sensor HUD is split into two independently-toggled layers:
     bottom-centre, the boom/dock estimate at bottom-right) so the point cloud
     above them stays visible: tree height, trunk top, crown base, uncertainty,
     docking height, boom angle, boom extension, platform level, boom distance,
-    docking lower angle, status;
+    status.  The boom rows map field-for-field to the live `dock_orchestrator`
+    PLAN.  `docking_lower_angle` is deliberately not shown (the live PLAN does
+    not publish it and it is always 0 in a scan-only estimate);
    - `no_data` — no usable cloud; the estimate is never shown from bad geometry.
      A **completed** scan also drops back to `no_data` ("stream stopped — estimate
      is stale") once `v1/lidar/raw` is stale past a 3 s grace, so a replay that

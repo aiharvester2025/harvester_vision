@@ -93,7 +93,6 @@ _DEFAULT_LIDAR_SCAN_ROWS = {
     'boom_extension': 'Boom Extension',
     'platform_level': 'Platform Level',
     'boom_distance': 'Boom Distance',
-    'docking_lower': 'Docking Lower Angle',
     'status': 'Status',
 }
 

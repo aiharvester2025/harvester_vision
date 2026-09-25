@@ -268,9 +268,14 @@ same "never a false green" rule the docking guidance uses).
     (ros2_ws parity).  `--base-x` overrides `base_x`; a camera
     `v1/docking/trunk_estimate` overrides the derivation when present.
   - Closed-form boom IK with the as-built `ros2_ws` corrections
-    (`leveling = +theta_b`, `BOOM_PIVOT_WORLD_Z = 1.81 m`), plus `theta_d`
-    (`docking_lower_angle`, the extra boom-lower angle to descend onto the dock;
-    0 at the solved configuration).
+    (`leveling = +theta_b`, `BOOM_PIVOT_WORLD_Z = 1.81 m`).  The boom card rows
+    map field-for-field to the live `dock_orchestrator` PLAN (Docking Height,
+    Boom Angle, Boom Extension, Platform Level, Boom Distance, Status).
+  - `docking_lower_angle` (`theta_d`) is retained on the dataclass for consumers
+    with a live boom pose, but is **NOT a HUD row**: the live PLAN does not
+    publish it, and in a scan-only estimate it is structurally always 0 (one IK
+    solution fed back through the forward kinematics), so it would be a
+    misleading constant.  Do not re-add it.
   - Parity tests against the real `tree_scan_002` recording live in
     `test_scan_estimate.RecordedScanParityTest` (skipped without the fixture).
 - Layout/config: the `lidar_scan` panel in the same `--hud-config` file as the

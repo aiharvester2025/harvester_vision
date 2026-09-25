@@ -302,9 +302,12 @@ class BoomIkTest(unittest.TestCase):
     def test_rows_shape(self):
         rows = solve_boom_target(12.0, 4.87, crown_base_m=9.2).to_rows()
         keys = [r['key'] for r in rows]
+        # No docking_lower row: the live orchestrator PLAN does not publish it,
+        # and in a scan-only HUD it is structurally always 0 (see the dataclass
+        # note), so it would be a misleading constant.
         self.assertEqual(keys, ['docking_height', 'boom_angle', 'boom_extension',
-                                'platform_level', 'boom_distance',
-                                'docking_lower', 'status'])
+                                'platform_level', 'boom_distance', 'status'])
+        self.assertNotIn('docking_lower', keys)
         for row in rows:
             self.assertEqual(row['group'], 'boom')
 
@@ -339,7 +342,13 @@ class TrunkDistanceTest(unittest.TestCase):
 
 
 class DockingLowerAngleTest(unittest.TestCase):
-    """theta_d mirrors ros2_ws kinematics.docking_lower_angle."""
+    """theta_d mirrors ros2_ws kinematics.docking_lower_angle.
+
+    The VALUE is retained on the dataclass (and this function) for consumers
+    that have a live boom pose to descend FROM, but it is deliberately NOT a HUD
+    row: a scan-only estimate always has theta_d == 0 by construction, and the
+    live dock_orchestrator PLAN does not publish it either.
+    """
 
     def test_zero_at_solved_configuration(self):
         # ros2_ws test_docking_lower_angle_zero_at_solved_config: at the solved
@@ -352,11 +361,12 @@ class DockingLowerAngleTest(unittest.TestCase):
         # low dock point needs a positive lowering angle.
         self.assertGreater(docking_lower_angle(0.5, 10.0, 0.0), 0.0)
 
-    def test_rows_include_lower_angle(self):
+    def test_not_a_hud_row(self):
+        # It must NOT appear as a row: it is always 0 in a scan-only HUD and the
+        # live PLAN omits it, so a constant-zero row would mislead the operator.
         target = solve_boom_target(12.0, 9.37, crown_base_m=9.2)
         rows = {r['key']: r for r in target.to_rows()}
-        self.assertIn('docking_lower', rows)
-        self.assertNotEqual(rows['docking_lower']['value'], '—')
+        self.assertNotIn('docking_lower', rows)
 
 
 class DeriveDistanceFromAxisTest(unittest.TestCase):
@@ -496,7 +506,7 @@ class RecordedScanParityTest(unittest.TestCase):
                                delta=0.2)
         rows = {r['key']: r['value'] for r in target.to_rows()}
         for key in ('docking_height', 'boom_angle', 'boom_extension',
-                    'platform_level', 'boom_distance', 'docking_lower'):
+                    'platform_level', 'boom_distance'):
             with self.subTest(key=key):
                 self.assertNotEqual(rows[key], '—')
         # Docking height comes from the crown base (~9.2 - 2.0), not the top.

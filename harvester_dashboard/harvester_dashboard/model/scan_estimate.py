@@ -227,15 +227,20 @@ class BoomTarget:
              'valid': valid},
             {'key': 'platform_level', 'label': 'Platform Level', 'group': 'boom',
              'value': _num(self.platform_level_deg, '{:+.1f}°'), 'valid': valid},
-            {'key': 'boom_distance', 'label': 'Boom Distance', 'group': 'boom',
-             'value': _num(self.boom_horizontal_distance_m, '{:.2f} m'),
-             'valid': valid},
-            {'key': 'docking_lower', 'label': 'Docking Lower Angle',
-             'group': 'boom',
-             'value': _num(self.docking_lower_angle_deg, '{:+.1f}°'),
-             'valid': valid},
-            {'key': 'status', 'label': 'Status', 'group': 'boom',
-             'value': self.status, 'valid': valid},
+             {'key': 'boom_distance', 'label': 'Boom Distance', 'group': 'boom',
+              'value': _num(self.boom_horizontal_distance_m, '{:.2f} m'),
+              'valid': valid},
+             # NOTE: the docking lower angle is deliberately NOT a row.  The live
+             # dock_orchestrator PLAN does not publish it (only boom_plan_node
+             # does, for the diagram's step-5 descent), and in a scan-only HUD it
+             # is structurally always 0: theta_b and the extension come from one
+             # IK solution, so feeding that solution back through the forward
+             # kinematics gives current_z == H_dock and theta_d == 0 by
+             # construction.  A row that can only ever read +0.0° is misleading,
+             # so the value is kept on the dataclass for consumers that have a
+             # live boom pose, but not shown here.
+             {'key': 'status', 'label': 'Status', 'group': 'boom',
+              'value': self.status, 'valid': valid},
         ]
 
 
