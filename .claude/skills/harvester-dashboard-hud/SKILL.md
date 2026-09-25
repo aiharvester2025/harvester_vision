@@ -240,8 +240,16 @@ same "never a false green" rule the docking guidance uses).
   - **Frame matters:** the live MID-360 cloud is sensor-origin, the recorded
     Gazebo cloud is `frame_id: world`; the bridge picks `frame` from the packet
     header so height is absolute in both.
+  - **`d_horiz` is derived from the scanned trunk axis** when no explicit
+    distance is given, so a LiDAR-only scan needs no camera channel.  It is
+    boom-pivot-relative: `d_horiz = hypot(axis - (base_x + BOOM_PIVOT_BASE_X_OFFSET_M))`
+    with offset -0.87 m, so the reference trunk at x=8.5 gives 9.37 m
+    (ros2_ws parity).  `--base-x` overrides `base_x`; a camera
+    `v1/docking/trunk_estimate` overrides the derivation when present.
   - Closed-form boom IK with the as-built `ros2_ws` corrections
-    (`leveling = +theta_b`, `BOOM_PIVOT_WORLD_Z = 1.81 m`).
+    (`leveling = +theta_b`, `BOOM_PIVOT_WORLD_Z = 1.81 m`), plus `theta_d`
+    (`docking_lower_angle`, the extra boom-lower angle to descend onto the dock;
+    0 at the solved configuration).
   - Parity tests against the real `tree_scan_002` recording live in
     `test_scan_estimate.RecordedScanParityTest` (skipped without the fixture).
 - Layout/config: the `lidar_scan` panel in the same `--hud-config` file as the

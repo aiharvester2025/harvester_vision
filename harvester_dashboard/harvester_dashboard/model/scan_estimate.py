@@ -44,6 +44,14 @@ import numpy as np
 # 0.05 m base park offset.  ``ros2_ws`` validation found the un-corrected value
 # (1.76) produced a 0.05 m vertical docking error, so the corrected value ships.
 BOOM_PIVOT_WORLD_Z_M = 0.05 + 1.76  # 1.81
+# Boom pivot X offset in the base_link frame: turret origin x (-1.05) +
+# elevation origin x (+0.18) = -0.87 (ros2_ws kinematics.boom_pivot_world_xy,
+# turret yaw 0).
+BOOM_PIVOT_BASE_X_OFFSET_M = -1.05 + 0.18  # -0.87
+# Default harvester base world X.  In the Gazebo reference run the base parks at
+# world x = 0 (ros2_ws test_estimators.py), so the boom pivot sits at x = -0.87
+# and the reference trunk at x = 8.5 gives d_horiz = 9.37 m.
+DEFAULT_BASE_X_M = 0.0
 # Rigid boom tip-to-mount offset (``platform_level_joint`` origin x).
 BOOM_FIXED_LENGTH_M = 2.4
 # Platform tail length (``platform_fixed_joint`` xyz.x -> c_channel_reference).
@@ -507,6 +515,10 @@ def solve_boom_target(tree_height_m: Optional[float],
         target.boom_extension_total_m = cfg.extension_stroke_m
         target.platform_level_rad = theta_b
         target.platform_level_deg = math.degrees(theta_b)
+        target.docking_lower_angle_rad = docking_lower_angle(
+            theta_b, h_dock, target.boom_extension_total_m, cfg)
+        target.docking_lower_angle_deg = math.degrees(
+            target.docking_lower_angle_rad)
         return target
 
     extension = max(0.0, required - cfg.boom_fixed_length_m)
@@ -516,8 +528,66 @@ def solve_boom_target(tree_height_m: Optional[float],
     # platform tilted ~89 deg and the c-channel ~1.0 m off-target).
     target.platform_level_rad = theta_b
     target.platform_level_deg = math.degrees(theta_b)
+    # theta_d: extra boom-lower angle for the final descent onto the docking
+    # point (ros2_ws kinematics.docking_lower_angle).  It closes any vertical
+    # gap left after raising+leveling; it is 0 when already at H_dock, which is
+    # the case for the solved configuration.
+    target.docking_lower_angle_rad = docking_lower_angle(
+        theta_b, h_dock, target.boom_extension_total_m, cfg)
+    target.docking_lower_angle_deg = math.degrees(
+        target.docking_lower_angle_rad)
     target.status = 'READY'
     return target
+
+
+def docking_lower_angle(theta_b_rad: float, h_dock_m: float,
+                        extension_total_m: float,
+                        cfg: Optional[ScanEstimateConfig] = None) -> float:
+    """Extra boom-lower angle (``theta_d``) to descend onto the docking point.
+
+    Mirrors ``ros2_ws`` ``kinematics.docking_lower_angle``: after raising and
+    leveling, the platform may still sit above ``H_dock``; ``theta_d`` is the
+    angle the boom must lower to close that vertical gap while the C-opening
+    stays facing the trunk.  Returns 0 when already at height (the solved
+    configuration), so it is normally small.
+    """
+    cfg = cfg or ScanEstimateConfig()
+    boom_length = cfg.boom_fixed_length_m + float(extension_total_m or 0.0)
+    if boom_length <= 0.0:
+        return 0.0
+    current_z = cfg.boom_pivot_z_m + boom_length * math.sin(theta_b_rad)
+    dz = current_z - float(h_dock_m)
+    horizontal = boom_length * math.cos(theta_b_rad)
+    if horizontal <= 0.0:
+        return 0.0
+    return max(0.0, math.atan2(-dz, horizontal))
+
+
+def trunk_horizontal_distance(trunk_axis_xy,
+                              base_x_m: float = DEFAULT_BASE_X_M) -> Optional[float]:
+    """Return ``d_horiz`` from a scanned trunk axis (world frame).
+
+    ``d_horiz`` is the horizontal distance from the **boom pivot** to the trunk
+    centreline, NOT the trunk's distance from the world origin: the pivot is
+    offset from the base by ``BOOM_PIVOT_BASE_X_OFFSET_M`` (-0.87 m), so for the
+    reference trunk at x=8.5 with the base at x=0 the answer is 9.37 m
+    (ros2_ws ``test_distance_estimate_reachable``).
+
+    Returns ``None`` when the axis is unusable, so the caller reports NO DATA
+    rather than a distance measured from the wrong datum.
+    """
+    if not trunk_axis_xy or trunk_axis_xy[0] is None:
+        return None
+    try:
+        axis_x = float(trunk_axis_xy[0])
+        axis_y = float(trunk_axis_xy[1])
+        pivot_x = float(base_x_m) + BOOM_PIVOT_BASE_X_OFFSET_M
+    except (TypeError, ValueError, OverflowError):
+        return None
+    distance = math.hypot(axis_x - pivot_x, axis_y)
+    if not math.isfinite(distance) or distance <= 0.0:
+        return None
+    return distance
 
 
 def split_extension(total_m: Optional[float],
@@ -531,22 +601,37 @@ def split_extension(total_m: Optional[float],
 
 def plan_scan(points, horizontal_distance_m: Optional[float] = None,
               ground_z: Optional[float] = None, frame: str = 'sensor',
-              cfg: Optional[ScanEstimateConfig] = None):
+              cfg: Optional[ScanEstimateConfig] = None,
+              base_x_m: float = DEFAULT_BASE_X_M,
+              derive_distance_from_axis: bool = True):
     """Estimate the tree and solve the boom targets in one call.
 
     Returns ``(TreeEstimate, BoomTarget)``.  When the tree estimate is not
     valid the boom target is ``NO DATA`` and the HUD shows the reason rather
     than an estimate.
+
+    When ``horizontal_distance_m`` is None and ``derive_distance_from_axis`` is
+    true, ``d_horiz`` is derived from the **scanned trunk axis** — the whole
+    point of a LiDAR scan is to locate the trunk, so a scan must not depend on a
+    separate camera channel for the distance.  ``base_x_m`` is the harvester
+    base world X (0 in the reference geometry).  Pass
+    ``derive_distance_from_axis=False`` to require an explicit distance.
     """
     cfg = cfg or ScanEstimateConfig()
     tree = estimate_tree_height(points, cfg=cfg, ground_z=ground_z, frame=frame)
     if not tree.valid:
         return tree, BoomTarget(feasible=False, status='NO DATA',
                                 reason=tree.reason)
+    distance = horizontal_distance_m
+    if distance is None and derive_distance_from_axis:
+        distance = trunk_horizontal_distance(tree.trunk_axis_xy, base_x_m)
+    if distance is not None and cfg.default_horizontal_distance_m is None:
+        cfg = ScanEstimateConfig(
+            **{**cfg.__dict__, 'default_horizontal_distance_m': distance})
     # Dock at the crown base (trunk-end), passing its validity through so the
     # target refuses the unsafe fallback rather than docking inside the canopy.
     target = solve_boom_target(
-        tree.tree_height_m, horizontal_distance_m, cfg,
+        tree.tree_height_m, distance, cfg,
         crown_base_m=tree.crown_base_m, trunk_end_valid=tree.trunk_end_valid)
     return tree, target
 

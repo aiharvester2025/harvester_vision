@@ -108,6 +108,13 @@ frond/FFB zone (fronds ~9.45 m, FFBs ~9.55 m) and is why the platform crashed
 into them.  When the crown-base detector fails, the target is `NO DATA` — it
 never docks on the unsafe fallback.
 
+**The boom rows are computed from the scan alone.**  `d_horiz` is derived from
+the scanned trunk axis (boom-pivot-relative: `axis_x - (base_x - 0.87)`, so the
+reference trunk at x=8.5 gives 9.37 m), so a LiDAR-only scan with `CAMERAS=0`
+populates boom angle, extension, distance, platform level and docking lower
+angle without the camera trunk channel.  A `v1/docking/trunk_estimate` pose, when
+present, overrides the derivation.
+
 ## Run: dashboard
 
 **To display Xavier Gazebo data directly** (no relay; Xavier gateway must be

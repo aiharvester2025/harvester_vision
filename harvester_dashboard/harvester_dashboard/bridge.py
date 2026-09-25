@@ -1914,11 +1914,6 @@ if _QT_AVAILABLE:
             long window genuinely densifies the measurement.
             """
             from .model.scan_estimate import ScanEstimateConfig, plan_scan
-            cfg = ScanEstimateConfig(
-                docking_offset_below_top_m=float(getattr(
-                    self.config, 'docking_offset_below_top_m', 2.0)),
-                default_horizontal_distance_m=self._trunk_horizontal_distance_m(),
-            )
             cloud = self._scan_accumulated or self._lidar_points
             # The estimate's frame must match the cloud: the live MID-360 cloud
             # is sensor-origin (leveled, translation-free) while the recorded
@@ -1927,11 +1922,20 @@ if _QT_AVAILABLE:
             # the lowest point as if it were ground.
             header = self.model.state('v1/lidar/raw').last_header or {}
             frame = 'world' if header.get('frame_id') == 'world' else 'sensor'
+            cfg = ScanEstimateConfig(
+                docking_offset_below_top_m=float(getattr(
+                    self.config, 'docking_offset_below_top_m', 2.0)),
+                # A camera trunk estimate, when present, overrides the LiDAR
+                # derivation; otherwise plan_scan derives d_horiz from the
+                # scanned trunk axis (LiDAR-only).
+                default_horizontal_distance_m=self._camera_trunk_distance_m(),
+            )
             try:
                 tree, target = plan_scan(
                     cloud,
                     horizontal_distance_m=cfg.default_horizontal_distance_m,
-                    frame=frame, cfg=cfg)
+                    frame=frame, cfg=cfg,
+                    base_x_m=float(getattr(self.config, 'base_x_m', 0.0)))
             except Exception as error:  # pragma: no cover - defensive
                 self._scan_phase = 'no_data'
                 self._scan_reason = 'estimate failed: {}'.format(error)
@@ -1956,12 +1960,15 @@ if _QT_AVAILABLE:
             self._scan_estimate_rows_cache = rows
             self._scan_changed_emit()
 
-        def _trunk_horizontal_distance_m(self) -> Optional[float]:
-            """Best-effort trunk horizontal distance from the trunk estimate.
+        def _camera_trunk_distance_m(self) -> Optional[float]:
+            """Trunk horizontal distance from the camera trunk estimate, if any.
 
-            Uses the ``v1/docking/trunk_estimate`` pose when present (the same
-            source the trunk line reads), else ``None`` so the boom IK reports
-            NO DATA for the distance rather than inventing one.
+            This is the **optional** input: the camera depth pipeline publishes
+            ``v1/docking/trunk_estimate`` (an OAK-derived trunk pose), and when
+            it is present it can override the LiDAR-derived distance.  When
+            absent (e.g. a LiDAR-only scan with ``CAMERAS=0``, or the recorded
+            Gazebo data) it returns ``None`` so ``plan_scan`` derives ``d_horiz``
+            from the scanned trunk axis instead.
             """
             trunk = self.model.snapshot_trunk()
             if not isinstance(trunk, dict):

@@ -18,11 +18,13 @@ from harvester_dashboard.model.scan_estimate import (
     BoomTarget,
     ScanEstimateConfig,
     crown_base,
+    docking_lower_angle,
     estimate_tree_height,
     estimate_trunk_axis,
     plan_scan,
     solve_boom_target,
     split_extension,
+    trunk_horizontal_distance,
     trunk_top,
 )
 
@@ -267,6 +269,75 @@ class BoomIkTest(unittest.TestCase):
                                 'docking_lower', 'status'])
 
 
+class TrunkDistanceTest(unittest.TestCase):
+    """d_horiz is boom-pivot-relative, not origin-relative (ros2_ws parity)."""
+
+    def test_reference_geometry_matches_ros2_ws(self):
+        # Trunk at world x=8.5, base at x=0 -> pivot at -0.87 -> d_horiz = 9.37,
+        # exactly ros2_ws test_distance_estimate_reachable.
+        d = trunk_horizontal_distance((8.5, 0.0))
+        self.assertAlmostEqual(d, 9.37, delta=0.01)
+
+    def test_uses_base_x(self):
+        d = trunk_horizontal_distance((8.5, 0.0), base_x_m=1.0)
+        self.assertAlmostEqual(d, 8.37, delta=0.01)
+
+    def test_bad_axis_is_none(self):
+        self.assertIsNone(trunk_horizontal_distance(None))
+        self.assertIsNone(trunk_horizontal_distance((None, None)))
+
+
+class DockingLowerAngleTest(unittest.TestCase):
+    """theta_d mirrors ros2_ws kinematics.docking_lower_angle."""
+
+    def test_zero_at_solved_configuration(self):
+        # ros2_ws test_docking_lower_angle_zero_at_solved_config: at the solved
+        # theta_b/extension the boom is already at H_dock, so theta_d == 0.
+        target = solve_boom_target(12.0, 9.37, crown_base_m=9.2)
+        self.assertAlmostEqual(target.docking_lower_angle_rad, 0.0, places=6)
+
+    def test_non_negative_when_boom_is_above_the_dock(self):
+        # ros2_ws test_docking_lower_angle_non_negative: a boom angled above a
+        # low dock point needs a positive lowering angle.
+        self.assertGreater(docking_lower_angle(0.5, 10.0, 0.0), 0.0)
+
+    def test_rows_include_lower_angle(self):
+        target = solve_boom_target(12.0, 9.37, crown_base_m=9.2)
+        rows = {r['key']: r for r in target.to_rows()}
+        self.assertIn('docking_lower', rows)
+        self.assertNotEqual(rows['docking_lower']['value'], '—')
+
+
+class DeriveDistanceFromAxisTest(unittest.TestCase):
+    """A LiDAR-only scan must not need a separate camera distance channel."""
+
+    def test_plan_scan_derives_distance_from_the_axis(self):
+        # No d_horiz supplied: it is derived from the scanned trunk axis, so the
+        # boom rows are populated (this is what was blank on the recording).
+        cloud = _synthetic_tree(axis=(8.5, 0.0))
+        tree, target = plan_scan(cloud, frame='world')
+        self.assertTrue(tree.valid)
+        self.assertIsNotNone(target.boom_horizontal_distance_m)
+        self.assertAlmostEqual(target.boom_horizontal_distance_m, 9.37, delta=0.3)
+        self.assertTrue(target.feasible)
+        # Every boom row carries a value, not a dash.
+        for row in target.to_rows():
+            self.assertNotEqual(row['value'], '—', row)
+
+    def test_explicit_distance_overrides_derivation(self):
+        cloud = _synthetic_tree(axis=(8.5, 0.0))
+        _tree, target = plan_scan(cloud, horizontal_distance_m=7.77,
+                                  frame='world')
+        self.assertAlmostEqual(target.boom_horizontal_distance_m, 7.77)
+
+    def test_derivation_can_be_disabled(self):
+        cloud = _synthetic_tree(axis=(8.5, 0.0))
+        _tree, target = plan_scan(cloud, frame='world',
+                                  derive_distance_from_axis=False)
+        self.assertIsNone(target.boom_horizontal_distance_m)
+        self.assertEqual(target.status, 'NO DATA')
+
+
 class PlanScanTest(unittest.TestCase):
     def test_end_to_end(self):
         cloud = _synthetic_tree(trunk_top_z=12.0)
@@ -335,6 +406,23 @@ class RecordedScanParityTest(unittest.TestCase):
         # 9.2 - 2.0 = 7.2, NOT the legacy tree_top - 2.0 = 10.0 that crashed.
         self.assertAlmostEqual(target.docking_height_m, 7.2, delta=0.5)
         self.assertNotAlmostEqual(target.docking_height_m, 10.0, delta=0.5)
+
+    def test_full_estimate_from_the_recording(self):
+        # End to end from the recording with NO external distance: the boom rows
+        # must all be populated from the scan alone.
+        tree, target = plan_scan(self._roi(), frame='world')
+        self.assertTrue(tree.valid)
+        self.assertEqual(target.status, 'READY')
+        # d_horiz derived from the scanned axis (8.5) + pivot offset -> ~9.37.
+        self.assertAlmostEqual(target.boom_horizontal_distance_m, 9.37,
+                               delta=0.2)
+        rows = {r['key']: r['value'] for r in target.to_rows()}
+        for key in ('docking_height', 'boom_angle', 'boom_extension',
+                    'platform_level', 'boom_distance', 'docking_lower'):
+            with self.subTest(key=key):
+                self.assertNotEqual(rows[key], '—')
+        # Docking height comes from the crown base (~9.2 - 2.0), not the top.
+        self.assertAlmostEqual(target.docking_height_m, 7.2, delta=0.6)
 
 
 if __name__ == '__main__':

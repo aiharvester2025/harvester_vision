@@ -38,6 +38,10 @@ class DashboardConfig:
     # Docking point offset below the trunk top (m), used by the LiDAR scan
     # estimate.  Deployment decision: 2.0 m below the trunk top.
     docking_offset_below_top_m: float = 2.0
+    # Harvester base world X, used to derive the boom-pivot-relative horizontal
+    # distance from a scanned trunk axis.  0 in the reference geometry (the boom
+    # pivot is then at x = -0.87, so the trunk at x = 8.5 gives d_horiz = 9.37 m).
+    base_x_m: float = 0.0
     # LiDAR standby/normal control endpoint for the operator scan (the producer's
     # PULL socket).  Empty disables it: the dashboard stays fully render-only.
     # This is the one opt-in exception to the render-only rule; see
@@ -92,6 +96,10 @@ class DashboardConfig:
         parser.add_argument('--docking-offset-below-top-m', type=float, default=2.0,
                             help='docking point offset below the trunk top (m) for '
                                  'the LiDAR scan estimate (default 2.0)')
+        parser.add_argument('--base-x', type=float, default=0.0,
+                            help='harvester base world X (m), used to derive the '
+                                 'boom-pivot-relative d_horiz from the scanned '
+                                 'trunk axis (default 0.0)')
         parser.add_argument('--lidar-control', default='',
                             help='optional LiDAR standby/normal control endpoint for '
                                  'the scan HUD (the producer PULL socket, e.g. '
@@ -119,6 +127,7 @@ class DashboardConfig:
             safety_config_path=(known.safety_config or None),
             cutter_config_path=(known.cutter_config or None),
             docking_offset_below_top_m=max(0.0, known.docking_offset_below_top_m),
+            base_x_m=float(getattr(known, 'base_x', 0.0)),
             lidar_control_endpoint=(known.lidar_control or ''),
             lidar_scan_seconds=scan_seconds,
         )
