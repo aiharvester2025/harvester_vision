@@ -204,7 +204,11 @@ The sensor HUD is split into two independently-toggled layers:
     above them stays visible: tree height, trunk top, crown base, uncertainty,
     docking height, boom angle, boom extension, platform level, boom distance,
     docking lower angle, status;
-  - `no_data` — no usable cloud; the estimate is never shown from bad geometry.
+   - `no_data` — no usable cloud; the estimate is never shown from bad geometry.
+     A **completed** scan also drops back to `no_data` ("stream stopped — estimate
+     is stale") once `v1/lidar/raw` is stale past a 3 s grace, so a replay that
+     reached the end of its file cannot leave a stale READY on screen.
+
 
   The estimate runs on the **accumulated** cloud over the whole window (capped),
   not the last frame, and a live point count with a sparse/filling/dense hint
@@ -507,6 +511,15 @@ The dashboard converts the sensor-frame attitude to its stabilization frame in
 `decoders/imustab.stabilize_points` the OAK cloud uses, so one stabilization
 implementation serves both sensors. The LiDAR IMU state is kept separate from
 the camera IMU state, so the two never mix.
+
+**Only the vibration band is removed (`imustab.VIBRATION_BAND_DEG`, 8°).**  A
+larger tilt is machine motion, not vibration: rotating the cloud by it collapses
+the scene (the Gazebo recordings' IMU is pure attitude and swings to ~60° pitch,
+which folds a 9 m trunk to ~4 m).  Outside the band the cloud is shown raw and
+`bridge.lidarImuMotion` is set, so the HUD reports "motion — stab withheld"
+rather than silently distorting the view.  Real hydraulic vibration is a few
+degrees, so it stays inside the band.  This is why the recorded replay looks
+correct without the operator having to press `7`.
 
 ### LiDAR timestamp provenance (`v1/lidar/raw`)
 

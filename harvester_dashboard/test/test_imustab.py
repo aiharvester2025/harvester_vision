@@ -5,9 +5,11 @@ import unittest
 import numpy as np
 
 from harvester_dashboard.decoders.imustab import (
+    VIBRATION_BAND_DEG,
     gravity_to_rpy,
     tilt_delta_rotation,
     stabilize_points,
+    within_vibration_band,
 )
 
 
@@ -82,6 +84,42 @@ class TiltDeltaRotationTest(unittest.TestCase):
     def test_identity_delta_is_identity(self):
         r = tilt_delta_rotation([0.0, 0.0], [0.0, 0.0])
         np.testing.assert_allclose(r, np.eye(3), atol=1e-6)
+
+
+class VibrationBandTest(unittest.TestCase):
+    """Only small tilts are vibration; large tilts are machine motion."""
+
+    def test_small_tilt_is_within_the_band(self):
+        # A 3-degree wobble is vibration and should be stabilized.
+        import math
+        self.assertTrue(within_vibration_band(
+            [math.radians(3.0), 0.0], [0.0, 0.0]))
+
+    def test_large_tilt_is_outside_the_band(self):
+        # The Gazebo recording swings pitch to ~60 deg: machine motion, not
+        # vibration, so stabilization must be withheld (it would collapse the
+        # cloud, moving a 9 m trunk point to ~4 m).
+        import math
+        self.assertFalse(within_vibration_band(
+            [0.0, math.radians(-60.0)], [0.0, 0.0]))
+
+    def test_just_over_the_band_is_rejected(self):
+        import math
+        self.assertFalse(within_vibration_band(
+            [math.radians(VIBRATION_BAND_DEG + 1.0), 0.0], [0.0, 0.0]))
+        self.assertTrue(within_vibration_band(
+            [math.radians(VIBRATION_BAND_DEG - 1.0), 0.0], [0.0, 0.0]))
+
+    def test_reference_is_relative(self):
+        # The band is on the DELTA, so a machine already tilted 30 deg is still
+        # stabilizable for a small wobble about that pose.
+        import math
+        base = math.radians(30.0)
+        self.assertTrue(within_vibration_band(
+            [base + math.radians(2.0), 0.0], [base, 0.0]))
+
+    def test_non_finite_is_rejected(self):
+        self.assertFalse(within_vibration_band([float('nan'), 0.0], [0.0, 0.0]))
 
 
 if __name__ == '__main__':

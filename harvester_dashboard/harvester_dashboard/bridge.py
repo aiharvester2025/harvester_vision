@@ -160,6 +160,9 @@ if _QT_AVAILABLE:
             # separate from the camera IMU state so the two never mix.
             self._lidar_imu_attitude: Optional[tuple] = None
             self._lidar_imu_reference: Optional[tuple] = None
+            # True when the LiDAR IMU tilt exceeded the vibration band, so
+            # stabilization was withheld (machine motion, not vibration).
+            self._lidar_imu_motion = False
             # LiDAR scan state machine.  ``idle`` until the operator presses
             # SCAN; ``scanning`` -> ``complete``/``no_data``.
             self._scan_phase = 'idle'
@@ -523,6 +526,11 @@ if _QT_AVAILABLE:
         # without this a scan would abort on the first 200 ms tick.
         _SCAN_CLOUD_GRACE_S = 5.0
 
+        # How long a COMPLETED scan keeps its estimate after the stream stops.
+        # Longer than the live stale window so a brief gap does not flicker the
+        # result cards, but short enough that a dead stream is obvious.
+        _SCAN_STALE_GRACE_S = 3.0
+
         # Minimum attitude change (rad, summed |droll|+|dpitch|) that triggers
         # a point-cloud recompute.  IMU is published at ~5 Hz (matching depth).
         _IMU_ATTITUDE_EPSILON = 1e-3
@@ -552,17 +560,32 @@ if _QT_AVAILABLE:
             (key 7 toggles both) so the scan is not smeared by machine
             vibration.  With stabilization off, or no IMU attitude yet, the raw
             (producer-leveled) cloud is shown unchanged.
+
+            Only the **vibration band** is removed.  A large tilt is machine
+            motion (a boom/body swing, or the pure-attitude IMU in the Gazebo
+            recordings, which swings to ~60 deg), and rotating the cloud by it
+            collapses the scene.  Outside the band the points are shown raw and
+            ``lidarImuMotion`` reports why, so the operator is not silently
+            looking at a distorted cloud.
             """
             raw = self._lidar_raw_points
             attitude = self._lidar_imu_attitude
             reference = self._lidar_imu_reference
+            self._lidar_imu_motion = False
             if (self._imu_enabled and raw and attitude is not None
                     and reference is not None):
                 try:
-                    from .decoders.imustab import stabilize_points
-                    stabilized = stabilize_points(
-                        np.asarray(raw, dtype=np.float32), attitude, reference)
-                    self._lidar_points = stabilized.tolist()
+                    from .decoders.imustab import (
+                        stabilize_points, within_vibration_band)
+                    if within_vibration_band(attitude, reference):
+                        stabilized = stabilize_points(
+                            np.asarray(raw, dtype=np.float32),
+                            attitude, reference)
+                        self._lidar_points = stabilized.tolist()
+                    else:
+                        # Machine motion, not vibration: do not rotate.
+                        self._lidar_imu_motion = True
+                        self._lidar_points = list(raw)
                 except Exception:
                     self._lidar_points = list(raw)
             else:
@@ -1876,6 +1899,20 @@ if _QT_AVAILABLE:
             return not state.is_stale(
                 time.monotonic(), self.config.stale_after_s)
 
+        def _scan_status_stale_ok(self) -> bool:
+            """False when a COMPLETED scan's stream has gone stale.
+
+            A finished scan keeps its result only while the stream is still
+            live.  When the source stops (a replay reaching the end of its
+            file, or a sensor dropping out) the estimate is no longer being
+            backed by data, so the HUD must stop presenting it as current.
+            Uses a longer grace than the live check so a brief gap does not
+            flicker the cards.
+            """
+            state = self.model.state('v1/lidar/raw')
+            return not state.is_stale(
+                time.monotonic(), self._SCAN_STALE_GRACE_S)
+
         def advance_scan(self) -> None:
             """Advance the scan state machine; called from ``refresh``.
 
@@ -1884,7 +1921,18 @@ if _QT_AVAILABLE:
             when ``scan_seconds`` elapses: both return the LiDAR to standby,
             keep the accumulated data, and run the estimate.  A stream that never
             produces a usable cloud is ``no_data``, never a completed scan.
+
+            A **completed** scan also drops back to ``no_data`` when the stream
+            goes stale (e.g. a replay reached the end of its file), so the HUD
+            never keeps showing a stale READY estimate against a dead stream.
             """
+            if self._scan_phase == 'complete':
+                if not self._scan_status_stale_ok():
+                    self._scan_phase = 'no_data'
+                    self._scan_reason = 'stream stopped — estimate is stale'
+                    self._scan_estimate_rows_cache = []
+                    self._scan_changed_emit()
+                return
             if self._scan_phase != 'scanning':
                 return
             if not self._scan_has_cloud():
@@ -2074,13 +2122,22 @@ if _QT_AVAILABLE:
         def _get_lidar_imu_active(self) -> bool:
             return self._lidar_imu_active()
 
+        def _get_lidar_imu_motion(self) -> bool:
+            """True when stabilization was withheld because the tilt is motion."""
+            return self._lidar_imu_motion
+
         def _get_lidar_imu_attitude_line(self) -> str:
             attitude = self._lidar_imu_attitude
             if attitude is None:
                 return 'lidar imu: —'
             roll_deg = math.degrees(attitude[0])
             pitch_deg = math.degrees(attitude[1])
-            state = 'stab on' if self._imu_enabled else 'stab off'
+            if self._lidar_imu_motion:
+                state = 'motion — stab withheld'
+            elif self._imu_enabled:
+                state = 'stab on'
+            else:
+                state = 'stab off'
             return 'lidar imu: roll {:+.1f}° pitch {:+.1f}° ({})'.format(
                 roll_deg, pitch_deg, state)
 
@@ -2240,6 +2297,8 @@ if _QT_AVAILABLE:
             bool, _get_lidar_imu_active, notify=lidar_imu_changed)
         lidarImuAttitudeLine = Property(
             str, _get_lidar_imu_attitude_line, notify=lidar_imu_changed)
+        lidarImuMotion = Property(
+            bool, _get_lidar_imu_motion, notify=lidar_imu_changed)
         scanPhase = Property(
             str, _get_scan_phase, notify=scan_changed)
         lidarControlEnabled = Property(

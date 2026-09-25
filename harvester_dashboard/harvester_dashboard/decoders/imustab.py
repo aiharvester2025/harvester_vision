@@ -22,6 +22,12 @@ from typing import Optional, Sequence, Tuple
 
 import numpy as np
 
+#: Largest tilt delta (degrees) still treated as vibration.  Beyond this the
+#: tilt is machine motion (boom/body) and is NOT removed, because rotating the
+#: cloud by it collapses the scene.  The recorded Gazebo IMU swings to ~60 deg
+#: (pure machine motion), while real hydraulic vibration is a few degrees.
+VIBRATION_BAND_DEG = 8.0
+
 
 def gravity_to_rpy(accel_ms2: Sequence[float]) -> Tuple[float, float, float]:
     """Return ``(roll_rad, pitch_rad, accel_norm_ms2)`` from an accelerometer
@@ -94,6 +100,12 @@ def stabilize_points(points: np.ndarray, current_rpy: Sequence[float],
 
     Returns a new ``Nx3`` float32 array.  Inputs of the wrong shape (or empty)
     are returned unchanged (as a float32 copy when possible).
+
+    Only the *vibration band* is removed: see :func:`within_vibration_band`.
+    A tilt larger than the band is machine motion, not vibration, and rotating
+    the cloud by it would visibly collapse the scene, so the points are
+    returned unchanged in that case (callers can use
+    :func:`within_vibration_band` to report why).
     """
     points = np.asarray(points, dtype=np.float64)
     if points.ndim != 2 or points.shape[1] != 3 or points.size == 0:
@@ -103,4 +115,26 @@ def stabilize_points(points: np.ndarray, current_rpy: Sequence[float],
     return rotated.astype(np.float32)
 
 
-__all__ = ['gravity_to_rpy', 'tilt_delta_rotation', 'stabilize_points']
+def within_vibration_band(current_rpy: Sequence[float],
+                          reference_rpy: Sequence[float],
+                          max_tilt_deg: float = VIBRATION_BAND_DEG) -> bool:
+    """True when the tilt delta is small enough to be vibration, not motion.
+
+    The harvester's hydraulic vibration is a small, fast roll/pitch wobble
+    (a few degrees).  Boom/body motion is a large, slow tilt (tens of degrees).
+    Rotating the cloud by the latter would collapse it, so stabilization must
+    only act inside the small band.  Returns ``False`` for non-finite input.
+    """
+    try:
+        delta = tilt_delta_rotation(current_rpy, reference_rpy)
+    except (TypeError, ValueError):
+        return False
+    # The rotation angle of the delta is the tilt magnitude.
+    cos_angle = (np.trace(delta) - 1.0) / 2.0
+    cos_angle = float(np.clip(cos_angle, -1.0, 1.0))
+    angle_deg = float(np.degrees(np.arccos(cos_angle)))
+    return np.isfinite(angle_deg) and angle_deg <= max_tilt_deg
+
+
+__all__ = ['gravity_to_rpy', 'tilt_delta_rotation', 'stabilize_points',
+           'within_vibration_band', 'VIBRATION_BAND_DEG']

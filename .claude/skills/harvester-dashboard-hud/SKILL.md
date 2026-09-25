@@ -271,6 +271,14 @@ same "never a false green" rule the docking guidance uses).
   and the ROS-style `orientation` quaternion used by the `tree_scan_002`
   recordings (`quaternion_to_rpy`). Key `7` toggles stabilization for both
   clouds; the LiDAR reference is latched separately so the two IMUs never mix.
+
+  **Vibration band.** Only tilt deltas within `imustab.VIBRATION_BAND_DEG` (8°)
+  are removed.  A larger tilt is machine motion, not vibration, and rotating the
+  cloud by it collapses the scene — the Gazebo recordings' IMU is pure attitude
+  and swings to ~60° pitch, which folded a 9 m trunk to ~4 m.  Outside the band
+  the cloud is shown raw and `bridge.lidarImuMotion` is set so the overlay's IMU
+  line reads "motion — stab withheld" instead of silently distorting the view.
+  Real hydraulic vibration is a few degrees, so it stays inside the band.
 - ADVISORY ONLY: the estimate is geometry from one scan, not a measured contact.
   The overlay must always show the advisory line; the five measured range sensors
   remain the authoritative docking guard. The camera↔LiDAR extrinsic is

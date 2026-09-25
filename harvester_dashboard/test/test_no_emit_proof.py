@@ -445,6 +445,97 @@ class NoEmitProofTest(unittest.TestCase):
         # The stabilized cloud still has the same point count and distances.
         self.assertEqual(len(bridge.lidarPoints), 2)
 
+    def _ingest_lidar_json(self, model, payload):
+        """Ingest a raw JSON packet on v1/imu/lidar (the recording shape)."""
+        import json as _json
+        from helpers import base_header
+        from harvester_telemetry_contract import pack_message
+        header = base_header(sequence=1, codec='json')
+        model.ingest_frames(pack_message(
+            'v1/imu/lidar', header, _json.dumps(payload).encode('utf-8')))
+
+    def test_large_imu_tilt_withholds_stabilization(self):
+        # The Gazebo recording's IMU is pure machine motion (~60 deg pitch).
+        # Rotating the cloud by it collapses the scene, so stabilization must be
+        # withheld and the HUD must say so rather than showing a distorted cloud.
+        try:
+            import PySide2  # noqa: F401
+        except ImportError:
+            self.skipTest('PySide2 unavailable')
+        import math
+        app, model, bridge = self._scan_bridge()
+        import numpy as np
+        pts = np.array([[8.5, 0.0, 9.0], [8.5, 0.0, 6.0]], dtype='<f4')
+        bridge.on_frame_decoded('v1/lidar/raw', pts)
+        # First sample latches the reference (level).
+        self._ingest_lidar_json(model, {
+            'orientation': {'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 1.0}})
+        app.processEvents()
+        # Second sample is a 60-degree pitch: outside the vibration band.
+        a = math.radians(60.0)
+        self._ingest_lidar_json(model, {
+            'orientation': {'x': 0.0, 'y': math.sin(a / 2), 'z': 0.0,
+                            'w': math.cos(a / 2)}})
+        app.processEvents()
+        self.assertTrue(bridge.lidarImuMotion)
+        self.assertIn('motion', bridge.lidarImuAttitudeLine)
+        # The cloud is NOT rotated: the 9 m point stays at 9 m.
+        self.assertAlmostEqual(bridge.lidarPoints[0][2], 9.0, delta=0.01)
+
+    def test_small_imu_tilt_stabilizes(self):
+        try:
+            import PySide2  # noqa: F401
+        except ImportError:
+            self.skipTest('PySide2 unavailable')
+        import math
+        app, model, bridge = self._scan_bridge()
+        import numpy as np
+        pts = np.array([[8.5, 0.0, 9.0]], dtype='<f4')
+        bridge.on_frame_decoded('v1/lidar/raw', pts)
+        self._ingest_lidar_json(model, {
+            'orientation': {'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 1.0}})
+        app.processEvents()
+        a = math.radians(3.0)   # vibration, inside the band
+        self._ingest_lidar_json(model, {
+            'orientation': {'x': 0.0, 'y': math.sin(a / 2), 'z': 0.0,
+                            'w': math.cos(a / 2)}})
+        app.processEvents()
+        self.assertFalse(bridge.lidarImuMotion)
+
+    def test_completed_scan_drops_to_no_data_when_stream_stops(self):
+        # A replay reaching the end of its file must not leave a stale READY
+        # estimate on screen.
+        try:
+            import PySide2  # noqa: F401
+        except ImportError:
+            self.skipTest('PySide2 unavailable')
+        import time as _time
+        app, model, bridge = self._scan_bridge()
+        import numpy as np
+        rng = np.random.default_rng(0)
+        tz = rng.uniform(1.0, 12.0, 1500)
+        trunk = np.stack([rng.normal(0, 0.1, 1500), rng.normal(0, 0.1, 1500),
+                          tz], axis=1)
+        th = rng.uniform(0, 6.28, 1500)
+        r = rng.uniform(0.5, 3.0, 1500)
+        canopy = np.stack([r * np.cos(th), r * np.sin(th),
+                           rng.uniform(9.2, 11.7, 1500)], axis=1)
+        cloud = np.vstack([trunk, canopy]).astype('<f4')
+        from helpers import lidar_packet
+        model.ingest_frames(lidar_packet(cloud))
+        bridge.on_frame_decoded('v1/lidar/raw', cloud)
+        bridge.begin_scan()
+        bridge._scan_started_at = _time.monotonic() - bridge._scan_seconds - 1.0
+        bridge.advance_scan()
+        self.assertEqual(bridge.scanPhase, 'complete')
+        # Simulate the stream ending: rewind the receipt clock past the grace.
+        state = model.state('v1/lidar/raw')
+        state.last_recv_monotonic_s -= (bridge._SCAN_STALE_GRACE_S + 1.0)
+        bridge.advance_scan()
+        self.assertEqual(bridge.scanPhase, 'no_data')
+        self.assertIn('stale', bridge._scan_reason)
+        self.assertEqual(bridge.scanEstimateRows, [])
+
 
 if __name__ == '__main__':
     unittest.main()
