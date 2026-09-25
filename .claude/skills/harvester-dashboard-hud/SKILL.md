@@ -191,7 +191,9 @@ Buffering **every** digit would add an 800 ms delay to all primary controls — 
 Full key map (render-only unless noted): `1` cutter view / toggle Cutter Range
 HUD, `2` toggle Boom+Docking HUDs (on cutter: back to docking + show them), `3`
 operator HUD, `4` LiDAR scan overlay (full-screen, hidden by default), `5` LiDAR
-view cycle (now includes the `camera` overlay view), `6` point cloud, `7` IMU
+view cycle (opens in the **front (x-z)** working view; cycles
+front → left → right → iso → camera → top, and includes the `camera` overlay
+view), `6` point cloud, `7` IMU
 stabilization A/B (covers **both** the OAK cloud and the MID-360 cloud), `0`/`Esc`
 clear annotation, `777`+`Enter` diagnostic layer, click = annotate (depth +
 camera-frame XYZ). The overlay also has on-screen SCAN/STOP/CANCEL/VIEW/ZOOM

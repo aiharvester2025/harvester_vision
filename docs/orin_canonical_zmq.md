@@ -138,7 +138,9 @@ DISPLAY=:1 PYTHONPATH=harvester_dashboard /usr/bin/python3 \
 Controls: `1` cutter view / toggle the Cutter Range HUD, `2` toggle the Boom +
 Docking HUDs (on the cutter view it returns to the docking camera and shows
 them), `3` operator sensor HUD, `4` full-screen LiDAR scan overlay, `5` LiDAR
-projection (now includes a `camera` overlay view), `6` camera point-cloud inset,
+projection (opens in the **front (x-z)** working view; cycles
+front → left → right → iso → camera → top, and includes the `camera` overlay
+view), `6` camera point-cloud inset,
 `7` IMU stabilization A/B (covers both the OAK and MID-360 clouds), `0`/`Esc`
 clear annotation, click to annotate (shows depth + camera-frame XYZ when the OAK
 depth stream is on). All actions are non-actuating annotations only. See

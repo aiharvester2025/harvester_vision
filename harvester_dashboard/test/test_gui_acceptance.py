@@ -194,11 +194,15 @@ def main() -> int:
     check('scan mode hides unrelated HUD', bridge.lidarScanActive is True)
     bridge.on_frame_decoded('v1/lidar/raw', cloud)
     app.processEvents()
-    expected = ['top', 'front', 'left', 'right', 'iso', 'camera', 'top']
-    check('lidar view starts top', bridge.lidarView == 'top')
+    expected = ['front', 'left', 'right', 'iso', 'camera', 'top', 'front']
+    check('lidar view starts front (x-z)', bridge.lidarView == 'front')
     for name in expected[1:]:
         key(Qt.Key_5)
         check('key 5 -> {}'.format(name), bridge.lidarView == name)
+    # Leave the overlay in the default front view for the screenshot.
+    for _ in range(6):
+        key(Qt.Key_5)
+    check('view returns to front', bridge.lidarView == 'front')
     grab('lidar_camera_overlay')
     # Pressing SCAN starts the guided state machine (render-only).
     bridge.begin_scan()

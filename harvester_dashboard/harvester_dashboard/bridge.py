@@ -127,7 +127,7 @@ if _QT_AVAILABLE:
             self._diagnostic_visible = False
             # The LiDAR inset is hidden at startup (key 4 toggles it).
             self._lidar_visible = False
-            self._lidar_view_index = 0
+            self._lidar_view_index = self._DEFAULT_LIDAR_VIEW_INDEX
             # Scan window precedence: an explicit --lidar-scan-seconds wins, else
             # the admin's hud_config lidar_scan.scan_seconds, else 15 s.
             config_seconds = getattr(config, 'lidar_scan_seconds', None)
@@ -360,6 +360,11 @@ if _QT_AVAILABLE:
         # Ordered projection modes: top-down, front, left, right, isometric,
         # then the camera-optical overlay view (full-screen scan overlay).
         _LIDAR_VIEWS = ('top', 'front', 'left', 'right', 'iso', 'camera')
+
+        # The scan overlay opens in the FRONT (x-z) view: the operator stands on
+        # the side of the trunk looking at it, which is the natural working view
+        # for a scan (the top-down view hides the trunk's height).
+        _DEFAULT_LIDAR_VIEW_INDEX = _LIDAR_VIEWS.index('front')
 
         @Slot()
         def cycle_lidar_view(self) -> None:
