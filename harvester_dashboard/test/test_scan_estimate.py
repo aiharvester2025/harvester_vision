@@ -178,8 +178,11 @@ class EstimateTreeHeightTest(unittest.TestCase):
         self.assertEqual(keys, ['tree_height', 'trunk_top', 'crown_base',
                                 'uncertainty'])
         for row in rows:
-            for field in ('key', 'label', 'value', 'valid'):
+            for field in ('key', 'label', 'value', 'valid', 'group'):
                 self.assertIn(field, row)
+            # The HUD splits the estimate into a tree card and a boom card, so
+            # every tree row must carry the tree group.
+            self.assertEqual(row['group'], 'tree')
 
 
 class BoomIkTest(unittest.TestCase):
@@ -267,6 +270,19 @@ class BoomIkTest(unittest.TestCase):
         self.assertEqual(keys, ['docking_height', 'boom_angle', 'boom_extension',
                                 'platform_level', 'boom_distance',
                                 'docking_lower', 'status'])
+        for row in rows:
+            self.assertEqual(row['group'], 'boom')
+
+    def test_rows_are_grouped_for_the_three_card_hud(self):
+        # The overlay renders rowsInGroup('tree') and rowsInGroup('boom') into
+        # separate cards; every row must belong to exactly one of them.
+        tree = estimate_tree_height(_synthetic_tree(), frame='world')
+        target = solve_boom_target(12.0, 9.37, crown_base_m=9.2)
+        rows = tree.to_rows() + target.to_rows()
+        groups = sorted({r['group'] for r in rows})
+        self.assertEqual(groups, ['boom', 'tree'])
+        for row in rows:
+            self.assertIn(row['group'], ('tree', 'boom'))
 
 
 class TrunkDistanceTest(unittest.TestCase):

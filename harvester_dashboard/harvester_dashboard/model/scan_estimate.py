@@ -154,16 +154,16 @@ class TreeEstimate:
                 return '—'
 
         return [
-            {'key': 'tree_height', 'label': 'Tree Height',
+            {'key': 'tree_height', 'label': 'Tree Height', 'group': 'tree',
              'value': _m(self.tree_height_m), 'valid': self.valid},
-            {'key': 'trunk_top', 'label': 'Trunk Top',
+            {'key': 'trunk_top', 'label': 'Trunk Top', 'group': 'tree',
              'value': _m(self.trunk_top_m), 'valid': self.valid},
             # A crown base from the unsafe fallback is flagged invalid so the
             # operator does not dock on it.
-            {'key': 'crown_base', 'label': 'Crown Base',
+            {'key': 'crown_base', 'label': 'Crown Base', 'group': 'tree',
              'value': _m(self.crown_base_m),
              'valid': self.valid and self.trunk_end_valid},
-            {'key': 'uncertainty', 'label': 'Uncertainty',
+            {'key': 'uncertainty', 'label': 'Uncertainty', 'group': 'tree',
              'value': _m(self.uncertainty_m), 'valid': self.valid},
         ]
 
@@ -199,22 +199,23 @@ class BoomTarget:
 
         valid = self.feasible
         return [
-            {'key': 'docking_height', 'label': 'Docking Height',
+            {'key': 'docking_height', 'label': 'Docking Height', 'group': 'boom',
              'value': _num(self.docking_height_m, '{:.2f} m'), 'valid': valid},
-            {'key': 'boom_angle', 'label': 'Boom Angle',
+            {'key': 'boom_angle', 'label': 'Boom Angle', 'group': 'boom',
              'value': _num(self.boom_angle_deg, '{:+.1f}°'), 'valid': valid},
-            {'key': 'boom_extension', 'label': 'Boom Extension',
+            {'key': 'boom_extension', 'label': 'Boom Extension', 'group': 'boom',
              'value': _num(self.boom_extension_total_m, '{:.3f} m'),
              'valid': valid},
-            {'key': 'platform_level', 'label': 'Platform Level',
+            {'key': 'platform_level', 'label': 'Platform Level', 'group': 'boom',
              'value': _num(self.platform_level_deg, '{:+.1f}°'), 'valid': valid},
-            {'key': 'boom_distance', 'label': 'Boom Distance',
+            {'key': 'boom_distance', 'label': 'Boom Distance', 'group': 'boom',
              'value': _num(self.boom_horizontal_distance_m, '{:.2f} m'),
              'valid': valid},
             {'key': 'docking_lower', 'label': 'Docking Lower Angle',
+             'group': 'boom',
              'value': _num(self.docking_lower_angle_deg, '{:+.1f}°'),
              'valid': valid},
-            {'key': 'status', 'label': 'Status',
+            {'key': 'status', 'label': 'Status', 'group': 'boom',
              'value': self.status, 'valid': valid},
         ]
 

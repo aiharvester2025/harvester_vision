@@ -196,9 +196,12 @@ The sensor HUD is split into two independently-toggled layers:
   - **STOP** — end early, keep the accumulated data, estimate now;
   - **CANCEL** — discard the scan, zero the timer, LiDAR → standby;
   - timeout — 15 s `scan_seconds` (admin-overridable) behaves like STOP;
-  - `complete` — the scan instructions hide and the **estimate rows** appear:
-    tree height, trunk top, crown base, uncertainty, docking height, boom angle,
-    boom extension, platform level, boom distance, docking lower angle, status;
+  - `complete` — the scan instructions hide and the **estimate rows** appear,
+    split across two short cards at the bottom edge (the tree estimate at
+    bottom-centre, the boom/dock estimate at bottom-right) so the point cloud
+    above them stays visible: tree height, trunk top, crown base, uncertainty,
+    docking height, boom angle, boom extension, platform level, boom distance,
+    docking lower angle, status;
   - `no_data` — no usable cloud; the estimate is never shown from bad geometry.
 
   The estimate runs on the **accumulated** cloud over the whole window (capped),

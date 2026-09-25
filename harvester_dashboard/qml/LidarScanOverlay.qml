@@ -162,15 +162,26 @@ Item {
         return [cx + x * s, cy - y * s];
     }
 
-    // ---- Info card: instructions while scanning, estimates when complete ----
+    // ---- Three short cards along the bottom ----
+    //
+    // One tall card blocked the trunk in the cloud, so the information is split
+    // into three short cards pinned to the bottom EDGE: scan state (left), tree
+    // estimate (centre), boom/dock estimate (right).  Each stays short so the
+    // cloud above the bottom strip stays fully visible.
+    readonly property real card_bottom_margin: layout ? layout.marginPx : 12
+    readonly property real card_gap: 8
+    readonly property real card_width: Math.max(
+        180, (width - 2 * card_bottom_margin - 2 * card_gap) / 3)
+
+    // (1) Scan state / guidance, bottom-left.
     Rectangle {
-        id: info_card
-        anchors.horizontalCenter: parent.horizontalCenter
+        id: scan_card
+        anchors.left: parent.left
         anchors.bottom: parent.bottom
-        anchors.bottomMargin: layout ? layout.marginPx : 16
-        width: Math.min(parent.width - 32,
-                        layout ? layout.width : 820)
-        height: card_content.height + 28
+        anchors.leftMargin: overlay.card_bottom_margin
+        anchors.bottomMargin: overlay.card_bottom_margin
+        width: overlay.card_width
+        height: scan_content.height + 20
         radius: 10
         color: "#0b0f14"
         opacity: layout ? layout.opacity : 0.85
@@ -179,30 +190,29 @@ Item {
         border.width: 2
 
         Column {
-            id: card_content
+            id: scan_content
             anchors.left: parent.left
             anchors.right: parent.right
             anchors.top: parent.top
-            anchors.margins: 14
-            spacing: 8
+            anchors.margins: 12
+            spacing: 6
 
             Text {
                 width: parent.width
                 text: (layout ? layout.caption : "LIDAR SCAN")
                       + "  ·  " + bridge.lidarViewLabel
                 color: "#bfe3ff"
-                font.pixelSize: layout ? layout.captionFontPx : 30
+                font.pixelSize: Math.max(13, (layout ? layout.captionFontPx : 30) - 8)
                 font.bold: true
                 elide: Text.ElideRight
             }
 
-            // Scan guidance / status banner.
             Text {
                 width: parent.width
                 text: bridge.scanGuideText
                 color: bridge.scanPhase === "complete" ? "#a8d08d"
                      : (bridge.scanPhase === "no_data" ? "#e25c5c" : "#e8eef4")
-                font.pixelSize: layout ? layout.guideFontPx : 34
+                font.pixelSize: Math.max(13, (layout ? layout.guideFontPx : 34) - 12)
                 font.bold: true
                 wrapMode: Text.WordWrap
             }
@@ -210,86 +220,191 @@ Item {
             // Progress bar while scanning.
             Rectangle {
                 width: parent.width
-                height: 10
-                radius: 5
+                height: 8
+                radius: 4
                 color: "#1c2833"
                 visible: bridge.scanPhase === "scanning"
                 Rectangle {
                     height: parent.height
-                    radius: 5
+                    radius: 4
                     color: "#4fc3f7"
                     width: parent.width * Math.max(0, Math.min(1, bridge.scanProgress))
                 }
             }
 
-            // Estimate rows: only present when the scan completed, so the
-            // instructions and the estimates never render together.
+            Text {
+                width: parent.width
+                text: bridge.scanQualityText
+                color: "#6b7a8c"
+                font.pixelSize: Math.max(10, (layout ? layout.captionFontPx : 30) - 16)
+                elide: Text.ElideRight
+            }
+            Text {
+                width: parent.width
+                text: bridge.lidarImuAttitudeLine
+                color: "#6b7a8c"
+                font.pixelSize: Math.max(10, (layout ? layout.captionFontPx : 30) - 16)
+                elide: Text.ElideRight
+            }
+            Text {
+                width: parent.width
+                visible: !bridge.lidarControlEnabled
+                text: "LiDAR control disabled — SCAN/STOP/CANCEL do not change the sensor"
+                color: "#e2a63c"
+                font.pixelSize: Math.max(10, (layout ? layout.captionFontPx : 30) - 16)
+                wrapMode: Text.WordWrap
+            }
+        }
+    }
+
+    // (2) Tree estimate, bottom-centre.  Hidden while scanning so the
+    // instructions and the estimates never render together.
+    Rectangle {
+        id: tree_card
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: overlay.card_bottom_margin
+        width: overlay.card_width
+        height: tree_content.height + 20
+        radius: 10
+        color: "#0b0f14"
+        opacity: layout ? layout.opacity : 0.85
+        border.color: "#a8d08d"
+        border.width: 2
+        visible: bridge.scanPhase === "complete"
+
+        Column {
+            id: tree_content
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.margins: 12
+            spacing: 4
+
+            Text {
+                width: parent.width
+                text: "TREE ESTIMATE"
+                color: "#bfe3ff"
+                font.pixelSize: Math.max(13, (layout ? layout.captionFontPx : 30) - 8)
+                font.bold: true
+            }
             Repeater {
-                model: bridge.scanEstimateRows ? bridge.scanEstimateRows.length : 0
+                model: overlay.rowsInGroup("tree")
                 delegate: Item {
-                    width: card_content.width
-                    height: est_value.height
-                    property var rowData: (bridge.scanEstimateRows
-                                           && index < bridge.scanEstimateRows.length)
-                                          ? bridge.scanEstimateRows[index] : null
+                    width: tree_content.width
+                    height: tree_val.height
+                    property var rowData: modelData
                     Text {
-                        id: est_label
                         anchors.left: parent.left
                         anchors.verticalCenter: parent.verticalCenter
-                        width: parent.width * 0.55
+                        width: parent.width * 0.58
                         text: rowData ? String(rowData.label) : ""
                         color: "#9fb4c7"
-                        font.pixelSize: layout ? layout.estimateFontPx : 34
+                        font.pixelSize: Math.max(12, (layout ? layout.estimateFontPx : 34) - 12)
                         elide: Text.ElideRight
                     }
                     Text {
-                        id: est_value
+                        id: tree_val
                         anchors.right: parent.right
                         anchors.verticalCenter: parent.verticalCenter
-                        width: parent.width * 0.45
+                        width: parent.width * 0.42
                         horizontalAlignment: Text.AlignRight
                         text: (rowData && rowData.value !== undefined)
                               ? String(rowData.value) : ""
                         color: (rowData && rowData.valid === false)
                                ? "#e25c5c" : "#e8eef4"
-                        font.pixelSize: layout ? layout.valueFontPx : 46
+                        font.pixelSize: Math.max(14, (layout ? layout.valueFontPx : 46) - 14)
                         font.bold: true
                         elide: Text.ElideLeft
                     }
                 }
             }
+        }
+    }
 
-            // Advisory line (never implies a measured contact).
+    // (3) Boom / dock estimate, bottom-right.
+    Rectangle {
+        id: boom_card
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        anchors.rightMargin: overlay.card_bottom_margin
+        anchors.bottomMargin: overlay.card_bottom_margin
+        width: overlay.card_width
+        height: boom_content.height + 20
+        radius: 10
+        color: "#0b0f14"
+        opacity: layout ? layout.opacity : 0.85
+        border.color: "#a8d08d"
+        border.width: 2
+        visible: bridge.scanPhase === "complete"
+
+        Column {
+            id: boom_content
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.margins: 12
+            spacing: 4
+
+            Text {
+                width: parent.width
+                text: "BOOM / DOCK ESTIMATE"
+                color: "#bfe3ff"
+                font.pixelSize: Math.max(13, (layout ? layout.captionFontPx : 30) - 8)
+                font.bold: true
+            }
+            Repeater {
+                model: overlay.rowsInGroup("boom")
+                delegate: Item {
+                    width: boom_content.width
+                    height: boom_val.height
+                    property var rowData: modelData
+                    Text {
+                        anchors.left: parent.left
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: parent.width * 0.58
+                        text: rowData ? String(rowData.label) : ""
+                        color: "#9fb4c7"
+                        font.pixelSize: Math.max(12, (layout ? layout.estimateFontPx : 34) - 12)
+                        elide: Text.ElideRight
+                    }
+                    Text {
+                        id: boom_val
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: parent.width * 0.42
+                        horizontalAlignment: Text.AlignRight
+                        text: (rowData && rowData.value !== undefined)
+                              ? String(rowData.value) : ""
+                        color: (rowData && rowData.valid === false)
+                               ? "#e25c5c" : "#e8eef4"
+                        font.pixelSize: Math.max(14, (layout ? layout.valueFontPx : 46) - 14)
+                        font.bold: true
+                        elide: Text.ElideLeft
+                    }
+                }
+            }
             Text {
                 width: parent.width
                 visible: bridge.scanStatusText.length > 0
                 text: bridge.scanStatusText
                 color: "#e2a63c"
-                font.pixelSize: layout ? layout.captionFontPx : 30
-                font.bold: true
-                wrapMode: Text.WordWrap
-            }
-
-            // Quality / provenance line.
-            Text {
-                width: parent.width
-                text: bridge.scanQualityText + "  ·  " + bridge.lidarImuAttitudeLine
-                color: "#6b7a8c"
-                font.pixelSize: Math.max(11, (layout ? layout.captionFontPx : 30) - 14)
-                elide: Text.ElideRight
-            }
-
-            // Whether the buttons actually control the sensor, so the operator
-            // is never misled about the LiDAR state.
-            Text {
-                width: parent.width
-                visible: !bridge.lidarControlEnabled
-                text: "LiDAR control disabled — SCAN/STOP/CANCEL will not change the sensor"
-                color: "#e2a63c"
-                font.pixelSize: Math.max(11, (layout ? layout.captionFontPx : 30) - 14)
+                font.pixelSize: Math.max(10, (layout ? layout.captionFontPx : 30) - 16)
                 wrapMode: Text.WordWrap
             }
         }
+    }
+
+    // Filter the estimate rows to one group (the rows carry a `group` key set by
+    // the estimator, so the split is data-driven, not hardcoded here).
+    function rowsInGroup(name) {
+        var rows = bridge.scanEstimateRows;
+        var out = [];
+        if (!rows) return out;
+        for (var i = 0; i < rows.length; i++) {
+            if (rows[i] && rows[i].group === name) out.push(rows[i]);
+        }
+        return out;
     }
 
     // ---- On-screen controls (touch/mouse, render-only) ---------------------

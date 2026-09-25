@@ -55,6 +55,13 @@ QML**, and it is strictly **render-only** (no socket writes from view/toggle con
     `HudOverlay` in `Dashboard.qml`, so the safety panels always paint on top —
     the overlay is a background layer, not a replacement for the HUD.
 
+    The information sits in **three short cards pinned to the bottom edge** so
+    the cloud above them stays visible (one tall card used to block the trunk):
+    scan state / guidance (bottom-left), **TREE ESTIMATE** (bottom-centre) and
+    **BOOM / DOCK ESTIMATE** (bottom-right). The two estimate cards are hidden
+    until `complete`, and split the rows by the `group` field the estimator sets
+    (`tree` / `boom`) via `rowsInGroup(name)` — data-driven, not hardcoded keys.
+
     **Exclusive scan mode.** While the overlay is up, `bridge.lidarScanActive`
     (= `lidarVisible`) hides the unrelated HUD: `Dashboard.qml` hides
     `HudOverlay` + `PointCloudInset`, and every `SensorPanel.qml` Loader's

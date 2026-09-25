@@ -40,6 +40,24 @@ class OverlayProjectionTest(unittest.TestCase):
         # reference it (its crosshair gated on it silently never drew).
         self.assertNotIn('"guiding"', _overlay_source())
 
+    def test_three_bottom_cards_split_the_information(self):
+        # The single tall card blocked the cloud; the information is now in
+        # three short cards pinned to the bottom edge (scan / tree / boom).
+        source = _overlay_source()
+        for card in ('scan_card', 'tree_card', 'boom_card'):
+            with self.subTest(card=card):
+                self.assertIn('id: %s' % card, source)
+        # The two estimate cards are bottom-anchored and split by group.
+        self.assertIn("rowsInGroup(\"tree\")", source)
+        self.assertIn("rowsInGroup(\"boom\")", source)
+        # The scan card is bottom-LEFT and the boom card bottom-RIGHT, so the
+        # centre of the cloud above the bottom strip stays clear.
+        self.assertIn('id: scan_card', source)
+        scan_block = source[source.index('id: scan_card'):]
+        self.assertIn('anchors.left: parent.left', scan_block[:400])
+        boom_block = source[source.index('id: boom_card'):]
+        self.assertIn('anchors.right: parent.right', boom_block[:400])
+
     def test_vehicle_views_are_not_collapsed_to_the_centre(self):
         # The specific regression: vehicle views must map a point to something
         # other than [cx, cy].  Assert the branches use the coordinates.
