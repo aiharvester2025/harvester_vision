@@ -13,6 +13,7 @@ import numpy as np
 from harvester_dashboard.decoders.livox_imu import (
     LIVOX_SENSOR_FRAME,
     OPTICAL_FRAME,
+    quaternion_to_rpy,
     sensor_rpy_to_optical,
 )
 from harvester_dashboard.decoders.imustab import stabilize_points
@@ -43,6 +44,45 @@ class SensorRpyConversionTest(unittest.TestCase):
     def test_frame_names(self):
         self.assertEqual(LIVOX_SENSOR_FRAME, 'mid360_link')
         self.assertEqual(OPTICAL_FRAME, 'oak_optical_frame')
+
+
+class QuaternionConversionTest(unittest.TestCase):
+    """The ROS-style ``orientation`` shape in the tree_scan_002 recordings."""
+
+    def test_identity_is_zero_rpy(self):
+        rpy = quaternion_to_rpy({'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 1.0})
+        for value in rpy:
+            self.assertAlmostEqual(value, 0.0)
+
+    def test_sequence_form_matches_mapping(self):
+        mapping = {'x': 0.1, 'y': 0.2, 'z': 0.3, 'w': 0.9}
+        seq = [0.1, 0.2, 0.3, 0.9]
+        self.assertEqual(quaternion_to_rpy(mapping), quaternion_to_rpy(seq))
+
+    def test_small_roll_about_x(self):
+        # A rotation of angle a about X gives roll ~= a, pitch ~= 0.
+        a = 0.2
+        rpy = quaternion_to_rpy({'x': math.sin(a / 2), 'y': 0.0, 'z': 0.0,
+                                 'w': math.cos(a / 2)})
+        self.assertAlmostEqual(rpy[0], a, places=5)
+        self.assertAlmostEqual(rpy[1], 0.0, places=5)
+
+    def test_missing_or_bad_returns_none(self):
+        for bad in (None, {}, {'x': 1.0}, 'nope', [0.0, 0.0],
+                    {'x': float('nan'), 'y': 0, 'z': 0, 'w': 1},
+                    {'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 0.0}):
+            with self.subTest(bad=bad):
+                self.assertIsNone(quaternion_to_rpy(bad))
+
+    def test_recorded_style_orientation_feeds_the_conversion_chain(self):
+        # The chain the bridge runs: recorded quaternion -> rpy -> optical.
+        rpy = quaternion_to_rpy(
+            {'x': 3.95e-13, 'y': -0.000769, 'z': -9.6e-09, 'w': 0.9999997})
+        self.assertIsNotNone(rpy)
+        optical = sensor_rpy_to_optical(rpy)
+        self.assertIsNotNone(optical)
+        self.assertAlmostEqual(optical[0], -rpy[0])   # roll negated
+        self.assertAlmostEqual(optical[1], rpy[1])    # pitch unchanged
 
 
 class ConversionThroughStabilizationTest(unittest.TestCase):

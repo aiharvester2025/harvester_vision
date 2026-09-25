@@ -469,11 +469,26 @@ if _QT_AVAILABLE:
             the optical convention ``imustab`` expects (see
             ``decoders/livox_imu.py``) before it is stored, and a bad sample is
             treated as "no attitude" rather than rotating the cloud by garbage.
+
+            Two payload shapes are accepted, because the live producer and the
+            recorded ROS-pipeline data differ:
+
+              * ``attitude_rpy_rad`` — the flat shape this repo's
+                ``lidar_capture`` publishes, and
+              * ``orientation`` (quaternion) / angular-velocity — the ROS-style
+                ``sensor_msgs/Imu`` shape in the ``tree_scan_002`` recordings.
             """
             if not isinstance(decoded, dict):
                 return
-            from .decoders.livox_imu import sensor_rpy_to_optical
-            attitude = sensor_rpy_to_optical(decoded.get('attitude_rpy_rad'))
+            from .decoders.livox_imu import (
+                quaternion_to_rpy, sensor_rpy_to_optical)
+            attitude_rpy = decoded.get('attitude_rpy_rad')
+            if attitude_rpy is None:
+                # ROS-style recording: derive roll/pitch from the quaternion.
+                orientation = decoded.get('orientation')
+                if isinstance(orientation, dict):
+                    attitude_rpy = quaternion_to_rpy(orientation)
+            attitude = sensor_rpy_to_optical(attitude_rpy)
             if attitude is None:
                 return
             previous = self._lidar_imu_attitude
@@ -1905,11 +1920,18 @@ if _QT_AVAILABLE:
                 default_horizontal_distance_m=self._trunk_horizontal_distance_m(),
             )
             cloud = self._scan_accumulated or self._lidar_points
+            # The estimate's frame must match the cloud: the live MID-360 cloud
+            # is sensor-origin (leveled, translation-free) while the recorded
+            # Gazebo cloud is world-registered (frame_id 'world').  Trusting the
+            # header keeps height absolute in both cases instead of subtracting
+            # the lowest point as if it were ground.
+            header = self.model.state('v1/lidar/raw').last_header or {}
+            frame = 'world' if header.get('frame_id') == 'world' else 'sensor'
             try:
                 tree, target = plan_scan(
                     cloud,
                     horizontal_distance_m=cfg.default_horizontal_distance_m,
-                    frame='sensor', cfg=cfg)
+                    frame=frame, cfg=cfg)
             except Exception as error:  # pragma: no cover - defensive
                 self._scan_phase = 'no_data'
                 self._scan_reason = 'estimate failed: {}'.format(error)

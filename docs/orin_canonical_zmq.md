@@ -62,6 +62,52 @@ Relay preserves each packet's original `source_id`/`source_mode`, so the
 dashboard badge stays correct (`SIMULATION` for Xavier, `HARDWARE` for the
 later Orin adapters).
 
+## Run: replay a recorded tree scan on the Orin (no hardware, no Xavier)
+
+The Xavier recorded canonical telemetry with `PacketRecorder` during the Gazebo
+tree-scan runs (`~/harvester_audits/tree_scan_001`, `tree_scan_002`).  Those are
+`.msgpack` recordings in this repo's own format, so `replay.py` feeds the real
+dashboard and the real estimator with **real simulated palm geometry** — no
+synthetic fixture needed.  `tree_scan_002` additionally carries `v1/imu/lidar`,
+so the IMU compensation path is exercised too.
+
+Pull just the two channels onto the Orin (gitignored `testdata/`):
+
+```bash
+cd ~/harvester_vision
+mkdir -p testdata/tree_scan_002
+rsync -az ubuntu@10.108.137.233:~/harvester_audits/tree_scan_002/{v1_lidar_raw,v1_imu_lidar} \
+      testdata/tree_scan_002/
+```
+
+Replay in a loop while the dashboard runs (the recordings are a single scan
+session, so loop them for a live-looking stream):
+
+```bash
+PYTHONPATH=canonical_zmq /home/marcop/depthai-env/bin/python3 \
+  -m canonical_zmq_publisher.replay testdata/tree_scan_002 \
+  --endpoint tcp://*:5590 --speed 2
+```
+
+Then point the dashboard at that endpoint (its default `--pub tcp://127.0.0.1:5590`
+already matches when the replay binds locally).  Open the LiDAR overlay (key `4`)
+and press SCAN: the estimate is taken from the accumulated cloud, and the
+recorded cloud is `frame_id: world`, so the bridge estimates it as world-frame
+(height is absolute, not ground-subtracted).
+
+Reference geometry (`ros2_ws/src/oil_palm_tree_description/config/tree_targets.yaml`):
+trunk at world (8.5, 0), trunk top 12.0 m, crown base 9.2 m.  The parity tests in
+`harvester_dashboard/test/test_scan_estimate.py` (`RecordedScanParityTest`) assert
+the estimator recovers these from the recording, and are skipped when the
+fixture is absent.
+
+**Docking height comes from the CROWN BASE, not the tree top.**
+`H_dock = crown_base - docking_offset_below_trunk_top_m` (~7.2 m for the
+reference tree).  The legacy `tree_top - 2.0` = 10.0 m lands inside the
+frond/FFB zone (fronds ~9.45 m, FFBs ~9.55 m) and is why the platform crashed
+into them.  When the crown-base detector fails, the target is `NO DATA` — it
+never docks on the unsafe fallback.
+
 ## Run: dashboard
 
 **To display Xavier Gazebo data directly** (no relay; Xavier gateway must be

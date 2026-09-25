@@ -41,6 +41,7 @@ cloud the wrong way.  It is asserted by the unit tests with a synthetic tilt.
 
 from __future__ import annotations
 
+import math
 from typing import Optional, Sequence, Tuple
 
 import numpy as np
@@ -77,6 +78,54 @@ def sensor_rpy_to_optical(attitude_rpy: Optional[Sequence[float]]
     return (-sensor_roll, sensor_pitch)
 
 
+def quaternion_to_rpy(orientation) -> Optional[Tuple[float, float, float]]:
+    """Convert a quaternion to ``(roll, pitch, yaw)`` in the sensor frame.
+
+    Accepts either a mapping ``{x, y, z, w}`` (the ROS ``geometry_msgs`` shape
+    used by the recorded ``sensor_msgs/Imu`` payloads) or a 4-sequence
+    ``(x, y, z, w)``.  Returns ``None`` for missing/malformed/degenerate input
+    so a bad sample is treated as "no attitude" like every other path here.
+
+    The result is the ZYX (yaw-pitch-roll) decomposition, matching the
+    ``attitude_rpy_rad`` shape this repo's producer publishes.
+    """
+    if orientation is None:
+        return None
+    try:
+        if isinstance(orientation, dict):
+            qx = float(orientation['x'])
+            qy = float(orientation['y'])
+            qz = float(orientation['z'])
+            qw = float(orientation['w'])
+        elif isinstance(orientation, (list, tuple)) and len(orientation) >= 4:
+            qx, qy, qz, qw = (float(orientation[0]), float(orientation[1]),
+                              float(orientation[2]), float(orientation[3]))
+        else:
+            return None
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
+    if not all(np.isfinite(v) for v in (qx, qy, qz, qw)):
+        return None
+    norm = math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw)
+    if norm <= 1e-9:
+        return None
+    qx, qy, qz, qw = qx / norm, qy / norm, qz / norm, qw / norm
+    # ZYX Euler (yaw about Z, pitch about Y, roll about X).
+    sinr_cosp = 2.0 * (qw * qx + qy * qz)
+    cosr_cosp = 1.0 - 2.0 * (qx * qx + qy * qy)
+    roll = math.atan2(sinr_cosp, cosr_cosp)
+    sinp = 2.0 * (qw * qy - qz * qx)
+    if abs(sinp) >= 1.0:
+        pitch = math.copysign(math.pi / 2.0, sinp)
+    else:
+        pitch = math.asin(sinp)
+    siny_cosp = 2.0 * (qw * qz + qx * qy)
+    cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
+    yaw = math.atan2(siny_cosp, cosy_cosp)
+    return (roll, pitch, yaw)
+
+
 __all__ = [
     'LIVOX_SENSOR_FRAME', 'OPTICAL_FRAME', 'sensor_rpy_to_optical',
+    'quaternion_to_rpy',
 ]

@@ -221,18 +221,39 @@ same "never a false green" rule the docking guidance uses).
   tells the QML whether the buttons actually control the sensor; when false the
   overlay says so on screen. It never touches the boom/platform/PLC — the LiDAR
   is a sensor, not an actuator.
-- Estimator: `model/scan_estimate.py` (Qt-free, numpy) — encoder-free trunk axis
-  + tight-cylinder trunk top, `H_dock = H − offset`, and the closed-form boom IK
-  with the **as-built** ros2_ws corrections (`leveling = +theta_b`,
-  `BOOM_PIVOT_WORLD_Z = 1.81 m`).
+- Estimator: `model/scan_estimate.py` (Qt-free, numpy) — the Orin counterpart of
+  the validated `ros2_ws` `harvester_dock/live_height_estimator.py`:
+  - **Trunk axis** must be radius-corrected for the single-sided (half-cylinder)
+    scan: `median_x + (2/pi)*trunk_radius`.  Without it the axis is biased ~0.22 m
+    toward the sensor (recording check: raw median 8.283 -> 8.506 vs true 8.5).
+  - **Docking height comes from the CROWN BASE (trunk-end), NOT the tree top:**
+    `H_dock = crown_base - docking_offset_below_trunk_top_m` (~7.2 m for the
+    reference tree).  The legacy `tree_top - 2.0` = 10.0 m lands inside the
+    frond/FFB zone (fronds ~9.45 m, FFBs ~9.55 m) and is why the platform crashed
+    into them.  When the crown-base detector fails the target is `NO DATA` — never
+    the unsafe fallback.
+  - **Crown base** is the canopy-annulus density jump (0.25 m bins, fixed
+    `z_min = 5 m` above harvester self-clutter).  The threshold is
+    `max(crown_density_threshold, ratio * trunk-clutter median)` so it adapts to
+    the sweep density (a dense 40-step recording has ~28k canopy pts/bin vs
+    ~100-150 trunk clutter; a sparse 5-step sweep is far lower).
+  - **Frame matters:** the live MID-360 cloud is sensor-origin, the recorded
+    Gazebo cloud is `frame_id: world`; the bridge picks `frame` from the packet
+    header so height is absolute in both.
+  - Closed-form boom IK with the as-built `ros2_ws` corrections
+    (`leveling = +theta_b`, `BOOM_PIVOT_WORLD_Z = 1.81 m`).
+  - Parity tests against the real `tree_scan_002` recording live in
+    `test_scan_estimate.RecordedScanParityTest` (skipped without the fixture).
 - Layout/config: the `lidar_scan` panel in the same `--hud-config` file as the
   other sensor HUDs (anchor/caption/size/fonts + `zoom_default_m`, `scan_seconds`,
   `redraw_hz`, `scrim_opacity`, `guide_font_px`, `estimate_font_px`).
 - MID-360 IMU: `v1/imu/lidar` (JSON) is routed to `bridge._on_lidar_imu`, which
   converts the sensor-frame attitude in `decoders/livox_imu.py` and applies the
-  **same** `decoders/imustab.stabilize_points` the OAK cloud uses. Key `7` toggles
-  stabilization for both clouds; the LiDAR reference is latched separately so the
-  two IMUs never mix.
+  **same** `decoders/imustab.stabilize_points` the OAK cloud uses. Two payload
+  shapes are accepted: the flat `attitude_rpy_rad` this repo's producer emits,
+  and the ROS-style `orientation` quaternion used by the `tree_scan_002`
+  recordings (`quaternion_to_rpy`). Key `7` toggles stabilization for both
+  clouds; the LiDAR reference is latched separately so the two IMUs never mix.
 - ADVISORY ONLY: the estimate is geometry from one scan, not a measured contact.
   The overlay must always show the advisory line; the five measured range sensors
   remain the authoritative docking guard. The camera↔LiDAR extrinsic is

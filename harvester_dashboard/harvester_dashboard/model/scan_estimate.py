@@ -55,9 +55,27 @@ EXTENSION_STAGES = 4
 DEFAULT_DOCKING_OFFSET_BELOW_TOP_M = 2.0
 # Trunk-top tight-cylinder radius that rejects the outward-growing frond canopy.
 DEFAULT_TRUNK_CYLINDER_RADIUS_M = 0.35
-# Canopy annulus for the crown-base cross-check.
+# Trunk radius used for the half-cylinder axis bias correction (ros2_ws
+# ``fit_trunk_axis`` default; the reference trunk is ~0.25-0.35 m).
+DEFAULT_AXIS_TRUNK_RADIUS_M = 0.35
+# Drop fronds/FFB clutter from the axis band with |y| > this.
+DEFAULT_AXIS_Y_MAX_M = 2.0
+# Canopy annulus for the crown-base density scan.
 DEFAULT_CANOPY_INNER_R_M = 0.35
-DEFAULT_CANOPY_OUTER_R_M = 4.0
+DEFAULT_CANOPY_OUTER_R_M = 2.0
+# Crown-base density histogram: 0.25 m bins (matches the tree geometry), a
+# threshold matched to the live sweep density, and fixed lower/upper bounds so
+# the histogram is deterministic.  z_min must sit above harvester self-clutter
+# (~3 m) and below the true crown base (~9 m).
+DEFAULT_CROWN_BIN_HEIGHT_M = 0.25
+DEFAULT_CROWN_DENSITY_THRESHOLD = 50
+# The crown bin must exceed the bare-trunk clutter by this multiple.  On the
+# tree_scan_002 recording the trunk runs ~100-150 pts/bin and the crown base
+# jumps to ~28k, so a 3x-clutter ratio plus the absolute floor cleanly
+# separates them while still firing on a sparse sweep.
+DEFAULT_CROWN_DENSITY_RATIO = 3.0
+DEFAULT_CROWN_Z_MIN_M = 5.0
+DEFAULT_CROWN_Z_MAX_M = 14.0
 # Mid-trunk band (relative to the local ground) used to estimate the axis.
 DEFAULT_AXIS_BAND_M = (1.0, 8.0)
 
@@ -67,8 +85,20 @@ class ScanEstimateConfig:
     """Tunable thresholds for :func:`estimate_tree_height`."""
 
     trunk_cylinder_radius_m: float = DEFAULT_TRUNK_CYLINDER_RADIUS_M
+    axis_trunk_radius_m: float = DEFAULT_AXIS_TRUNK_RADIUS_M
+    axis_y_max_m: float = DEFAULT_AXIS_Y_MAX_M
     canopy_inner_r_m: float = DEFAULT_CANOPY_INNER_R_M
     canopy_outer_r_m: float = DEFAULT_CANOPY_OUTER_R_M
+    crown_bin_height_m: float = DEFAULT_CROWN_BIN_HEIGHT_M
+    crown_density_threshold: int = DEFAULT_CROWN_DENSITY_THRESHOLD
+    # The effective threshold is max(crown_density_threshold, ratio * trunk
+    # clutter median) so it adapts to the sweep density.  Set
+    # crown_absolute_only to use the absolute threshold alone (the ros2_ws
+    # behaviour, matched to a specific sweep density).
+    crown_density_ratio: float = DEFAULT_CROWN_DENSITY_RATIO
+    crown_absolute_only: bool = False
+    crown_z_min_m: float = DEFAULT_CROWN_Z_MIN_M
+    crown_z_max_m: float = DEFAULT_CROWN_Z_MAX_M
     axis_band_m: tuple = DEFAULT_AXIS_BAND_M
     docking_offset_below_top_m: float = DEFAULT_DOCKING_OFFSET_BELOW_TOP_M
     boom_pivot_z_m: float = BOOM_PIVOT_WORLD_Z_M
@@ -94,6 +124,12 @@ class TreeEstimate:
     tree_height_m: Optional[float] = None
     trunk_top_m: Optional[float] = None
     crown_base_m: Optional[float] = None
+    # Crown-base (trunk-end) detection provenance.  ``trunk_end_valid`` is False
+    # when the detector failed and ``crown_base_m`` is only the unsafe
+    # top-minus-offset fallback, so callers must NOT dock on it.
+    crown_base_method: str = ''
+    trunk_end_valid: bool = False
+    trunk_end_reason: str = ''
     trunk_axis_xy: Optional[tuple] = None
     uncertainty_m: Optional[float] = None
     trunk_point_count: int = 0
@@ -114,8 +150,11 @@ class TreeEstimate:
              'value': _m(self.tree_height_m), 'valid': self.valid},
             {'key': 'trunk_top', 'label': 'Trunk Top',
              'value': _m(self.trunk_top_m), 'valid': self.valid},
+            # A crown base from the unsafe fallback is flagged invalid so the
+            # operator does not dock on it.
             {'key': 'crown_base', 'label': 'Crown Base',
-             'value': _m(self.crown_base_m), 'valid': self.valid},
+             'value': _m(self.crown_base_m),
+             'valid': self.valid and self.trunk_end_valid},
             {'key': 'uncertainty', 'label': 'Uncertainty',
              'value': _m(self.uncertainty_m), 'valid': self.valid},
         ]
@@ -193,10 +232,23 @@ def estimate_trunk_axis(cloud: np.ndarray, cfg: ScanEstimateConfig):
     """
     z = cloud[:, 2]
     low, high = cfg.axis_band_m
-    band = cloud[(z >= low) & (z <= high)]
-    if band.shape[0] < cfg.min_trunk_points:
-        return None, None, int(band.shape[0])
-    return float(np.median(band[:, 0])), float(np.median(band[:, 1])), int(band.shape[0])
+    dx = cloud[:, 0]
+    dy = cloud[:, 1]
+    z = cloud[:, 2]
+    # Drop fronds/FFB clutter that extends sideways before taking the median,
+    # exactly as the validated ros2_ws ``fit_trunk_axis`` does.
+    band = (z >= low) & (z <= high) & (np.abs(dy) <= cfg.axis_y_max_m)
+    count = int(band.sum())
+    if count < cfg.min_trunk_points:
+        return None, None, count
+    med_x = float(np.median(dx[band]))
+    med_y = float(np.median(dy[band]))
+    # Half-cylinder bias: a single-sided (half-cylinder) scan's median X sits at
+    # centre - r*(2/pi), so recover the true centreline by adding r*(2/pi).
+    # Verified against tree_scan_002: median 8.283 + 0.637*0.35 = 8.506 vs the
+    # true 8.5.  Without this the axis is biased ~0.22 m toward the sensor.
+    corrected_x = med_x + (2.0 / math.pi) * cfg.axis_trunk_radius_m
+    return corrected_x, med_y, count
 
 
 def trunk_top(cloud: np.ndarray, axis_xy, cfg: ScanEstimateConfig):
@@ -219,35 +271,61 @@ def trunk_top(cloud: np.ndarray, axis_xy, cfg: ScanEstimateConfig):
 
 
 def crown_base(cloud: np.ndarray, axis_xy, cfg: ScanEstimateConfig):
-    """Crown-base height from the canopy annulus density transition.
+    """Crown-base (trunk-end) height from the canopy-annulus density jump.
 
-    Reuses the legacy density method: the first 0.1 m bin (walking upward)
-    whose annulus point count exceeds the density threshold.  Returns the
-    height (m) or ``None``.  This is a cross-check, not the primary estimate.
+    The validated ``ros2_ws`` ``crown_base_from_density`` method (proven on
+    tree_scan_001/002: 9.00-9.25 m vs the 9.2 m ground truth).  The canopy
+    annulus ``r in [top_radius, canopy_outer_r]`` is nearly empty along the bare
+    trunk and densely populated above the crown base, so the bottom of the first
+    0.25 m histogram bin crossing the density threshold is the crown base.
+
+    The scan starts at a **fixed** ``crown_z_min_m`` (default 5 m): a bound tied
+    to the trunk top clips into the frond zone and biases the crown base low,
+    while no lower bound lets harvester/ground self-clutter at low z be misread
+    as the crown.  Returns ``(crown_base_m, method, reason)``.
     """
     if axis_xy[0] is None or cloud.shape[0] == 0:
-        return None
+        return None, 'none', 'no cloud'
     dx = cloud[:, 0] - axis_xy[0]
     dy = cloud[:, 1] - axis_xy[1]
     radial = np.hypot(dx, dy)
     annulus = cloud[(radial >= cfg.canopy_inner_r_m)
-                    & (radial <= cfg.canopy_outer_r_m)]
+                    & (radial < cfg.canopy_outer_r_m)]
     if annulus.shape[0] < cfg.min_trunk_points:
-        return None
+        return None, 'none', 'no canopy-annulus points'
     z = annulus[:, 2]
-    low = float(np.min(z))
-    high = float(np.max(z))
-    if not (math.isfinite(low) and math.isfinite(high)) or high <= low:
-        return None
-    bins = np.arange(low, high + 0.1, 0.1)
+    z = z[z >= cfg.crown_z_min_m]
+    if z.size == 0:
+        return None, 'none', 'no canopy-annulus points above crown_z_min'
+    # Fixed upper bound well above the tree top, so the histogram is deterministic.
+    bins = np.arange(cfg.crown_z_min_m,
+                     cfg.crown_z_max_m + cfg.crown_bin_height_m,
+                     cfg.crown_bin_height_m)
     counts, edges = np.histogram(z, bins=bins)
-    # A crown is a sustained density jump: require the bin to hold at least
-    # 10% of the densest bin, so a single stray return cannot trip it.
-    threshold = max(20, int(0.1 * counts.max()) if counts.size else 20)
+    if counts.size == 0:
+        return None, 'none', 'empty histogram'
+    # The density threshold must scale with the sweep density: the offline
+    # 40-step recording puts ~28k points in the crown-base bin but the trunk
+    # clutter is ~100-150/bin, while a sparse 5-step live sweep gives only
+    # ~100-150 canopy points/bin (dock.yaml).  A fixed absolute threshold
+    # therefore either fires on trunk clutter (dense) or never fires (sparse).
+    # Instead, treat the bare-trunk clutter as the baseline and require the
+    # crown bin to exceed it by a clear multiple: the median of the bins below
+    # the crown is the clutter level (the trunk is most of the low histogram).
+    clutter = float(np.median(counts[:max(1, counts.size // 2)]))
+    threshold = max(float(cfg.crown_density_threshold), cfg.crown_density_ratio * clutter)
+    if cfg.crown_absolute_only:
+        threshold = float(cfg.crown_density_threshold)
     for index, count in enumerate(counts):
         if count >= threshold:
-            return float(edges[index])
-    return None
+            return (float(edges[index]), 'density_drop',
+                    '{} canopy-annulus points in z=[{:.2f},{:.2f}] >= threshold '
+                    '{:.0f} (clutter median {:.0f})'.format(
+                        count, edges[index], edges[index + 1],
+                        threshold, clutter))
+    return (None, 'none',
+            'max canopy-annulus bin = {} < threshold {:.0f} (scan too sparse)'.format(
+                int(counts.max()) if counts.size else 0, threshold))
 
 
 def estimate_tree_height(points, cfg: Optional[ScanEstimateConfig] = None,
@@ -296,20 +374,36 @@ def estimate_tree_height(points, cfg: Optional[ScanEstimateConfig] = None,
             trunk_point_count=trunk_count, trunk_axis_xy=(axis_x, axis_y),
             reason='no trunk cylinder points ({} pts)'.format(trunk_count))
 
-    base = crown_base(cloud, (axis_x, axis_y), cfg)
+    base, base_method, base_reason = crown_base(cloud, (axis_x, axis_y), cfg)
 
-    # Fuse the tight-cylinder estimates; the 99.9th percentile is a robust
-    # variant of the same measurement and bounds the spread.  The crown-base
-    # transition is a cross-check only (it was the noisier legacy method).
-    candidates = [value for value in (z_top, z_p999) if value is not None]
-    height = float(np.median(candidates))
+    # Height: the trunk-top ``max`` upper envelope (fronds/occlusion can only
+    # hide the top, never exceed it).  The 99.9th percentile is a robust variant
+    # used only to bound the spread.
+    height = float(z_top)
     uncertainty = float(abs(z_top - z_p999)) if z_p999 is not None else None
+
+    # The docking reference is the CROWN BASE (trunk-end), not tree_top minus an
+    # offset: the offset lands inside the frond/FFB zone and is why the platform
+    # crashed into them.  When the detector fails we fall back to top-2.0 but
+    # mark the trunk-end INVALID so callers never dock on the fallback.
+    if base is None:
+        crown_base_m = max(0.0, height - cfg.docking_offset_below_top_m)
+        trunk_end_valid = False
+        trunk_end_reason = 'crown-base detector failed ({}); unsafe default ' \
+            'top-2.0 used'.format(base_reason)
+    else:
+        crown_base_m = base
+        trunk_end_valid = True
+        trunk_end_reason = base_reason
 
     return TreeEstimate(
         valid=True,
         tree_height_m=height,
         trunk_top_m=z_top,
-        crown_base_m=base,
+        crown_base_m=crown_base_m,
+        crown_base_method=base_method,
+        trunk_end_valid=trunk_end_valid,
+        trunk_end_reason=trunk_end_reason,
         trunk_axis_xy=(axis_x, axis_y),
         uncertainty_m=uncertainty,
         trunk_point_count=trunk_count,
@@ -319,12 +413,25 @@ def estimate_tree_height(points, cfg: Optional[ScanEstimateConfig] = None,
 
 def solve_boom_target(tree_height_m: Optional[float],
                       horizontal_distance_m: Optional[float],
-                      cfg: Optional[ScanEstimateConfig] = None) -> BoomTarget:
+                      cfg: Optional[ScanEstimateConfig] = None,
+                      crown_base_m: Optional[float] = None,
+                      trunk_end_valid: bool = True) -> BoomTarget:
     """Return the closed-form boom targets for a docking point.
 
     ``horizontal_distance_m`` is the distance from the turret/boom pivot to the
-    trunk centreline (``d_horiz``).  ``docking_height_m`` is
-    ``tree_height_m - cfg.docking_offset_below_top_m``.
+    trunk centreline (``d_horiz``).
+
+    The docking height is derived from the **crown base** (the trunk-end where
+    fronds/FFBs first appear), NOT from the tree top minus an offset: that lands
+    inside the frond/FFB zone (fronds ~9.45 m, FFBs ~9.55 m for the reference
+    tree) and is why the platform crashed into them.  So::
+
+        H_dock = crown_base - cfg.docking_offset_below_top_m
+
+    ``tree_height_m`` is still required (it bounds the geometry), but the docking
+    height no longer uses it.  When ``crown_base_m`` is None or the trunk-end is
+    invalid, the target is returned as ``NO DATA`` — never docked on the unsafe
+    ``tree_top - offset`` fallback.
 
     The IK is the as-built ``ros2_ws`` solution::
 
@@ -343,15 +450,21 @@ def solve_boom_target(tree_height_m: Optional[float],
     if tree_height_m is None:
         return BoomTarget(feasible=False, status='NO DATA',
                           reason='no tree height')
+    if crown_base_m is None or not trunk_end_valid:
+        # No confident trunk-end: refuse to produce a docking height, because
+        # the fallback (tree_top - offset) is inside the frond/FFB zone.
+        return BoomTarget(
+            feasible=False, status='NO DATA',
+            reason='no confident crown base (trunk-end) for docking height')
     if horizontal_distance_m is None:
         horizontal_distance_m = cfg.default_horizontal_distance_m
     if horizontal_distance_m is None:
         return BoomTarget(
             feasible=False, status='NO DATA',
-            docking_height_m=tree_height_m - cfg.docking_offset_below_top_m,
+            docking_height_m=float(crown_base_m) - cfg.docking_offset_below_top_m,
             reason='no trunk horizontal distance (d_horiz)')
 
-    h_dock = float(tree_height_m) - cfg.docking_offset_below_top_m
+    h_dock = float(crown_base_m) - cfg.docking_offset_below_top_m
     d_horiz = float(horizontal_distance_m)
 
     # Docking height below the ground plane makes no sense: clamp to the pivot.
@@ -430,7 +543,11 @@ def plan_scan(points, horizontal_distance_m: Optional[float] = None,
     if not tree.valid:
         return tree, BoomTarget(feasible=False, status='NO DATA',
                                 reason=tree.reason)
-    target = solve_boom_target(tree.tree_height_m, horizontal_distance_m, cfg)
+    # Dock at the crown base (trunk-end), passing its validity through so the
+    # target refuses the unsafe fallback rather than docking inside the canopy.
+    target = solve_boom_target(
+        tree.tree_height_m, horizontal_distance_m, cfg,
+        crown_base_m=tree.crown_base_m, trunk_end_valid=tree.trunk_end_valid)
     return tree, target
 
 
