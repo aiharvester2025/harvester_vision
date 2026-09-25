@@ -101,6 +101,17 @@ trunk at world (8.5, 0), trunk top 12.0 m, crown base 9.2 m.  The parity tests i
 the estimator recovers these from the recording, and are skipped when the
 fixture is absent.
 
+**Parity with the live estimator.**  `scan_estimate.ScanEstimateConfig` ships the
+same defaults as `ros2_ws/harvester_dock/live_height_estimator.estimate_height`:
+mid-trunk axis radius **0.25 m** (not the 0.35 m trunk-top radius), trunk-top
+cylinder radius 0.35 m, crown **absolute** density threshold **5000** points per
+0.25 m bin, `z_min` 5 m.  Running the ros2_ws estimator on the recorded cloud
+returns height 11.9274, crown 9.25, axis 8.437 — the dashboard reproduces those
+exactly, and `test_matches_the_ros2_ws_estimator_on_the_same_cloud` pins them.
+A live sweep is a different (sparser) cloud, so its numbers differ slightly:
+the crown base is a ±1 bin (0.25 m) measurement (live lands at 9.00-9.25 m for
+the 9.2 m reference) and the sparse sweep can miss the highest trunk point.
+
 **Docking height comes from the CROWN BASE, not the tree top.**
 `H_dock = crown_base - docking_offset_below_trunk_top_m` (~7.2 m for the
 reference tree).  The legacy `tree_top - 2.0` = 10.0 m lands inside the

@@ -61,11 +61,13 @@ EXTENSION_STROKE_M = 9.6
 EXTENSION_STAGES = 4
 # Default docking point offset below the trunk top (deployment decision).
 DEFAULT_DOCKING_OFFSET_BELOW_TOP_M = 2.0
-# Trunk-top tight-cylinder radius that rejects the outward-growing frond canopy.
+# Trunk-top tight-cylinder radius (the tapered top is wider than the mid-trunk).
 DEFAULT_TRUNK_CYLINDER_RADIUS_M = 0.35
-# Trunk radius used for the half-cylinder axis bias correction (ros2_ws
-# ``fit_trunk_axis`` default; the reference trunk is ~0.25-0.35 m).
-DEFAULT_AXIS_TRUNK_RADIUS_M = 0.35
+# Trunk radius used for the half-cylinder axis bias correction.  This is the
+# MID-TRUNK nominal radius (0.25 m), NOT the wider trunk-top radius -- matching
+# the validated ros2_ws ``fit_trunk_axis(trunk_radius=0.25)``.  Using the top
+# radius here over-corrects the axis by (2/pi)*(0.35-0.25) ~ 0.06 m.
+DEFAULT_AXIS_TRUNK_RADIUS_M = 0.25
 # Drop fronds/FFB clutter from the axis band with |y| > this.
 DEFAULT_AXIS_Y_MAX_M = 2.0
 # Canopy annulus for the crown-base density scan.
@@ -76,11 +78,11 @@ DEFAULT_CANOPY_OUTER_R_M = 2.0
 # the histogram is deterministic.  z_min must sit above harvester self-clutter
 # (~3 m) and below the true crown base (~9 m).
 DEFAULT_CROWN_BIN_HEIGHT_M = 0.25
-DEFAULT_CROWN_DENSITY_THRESHOLD = 50
-# The crown bin must exceed the bare-trunk clutter by this multiple.  On the
-# tree_scan_002 recording the trunk runs ~100-150 pts/bin and the crown base
-# jumps to ~28k, so a 3x-clutter ratio plus the absolute floor cleanly
-# separates them while still firing on a sparse sweep.
+# Points-per-bin density separating bare-trunk clutter from canopy.  The live
+# ros2_ws default is 5000 for the dense Mid-360 sweep; lower it for a sparse
+# sweep.  This dashboard keeps that absolute default and additionally offers an
+# adaptive floor (ratio * trunk clutter) for sweeps whose density is unknown.
+DEFAULT_CROWN_DENSITY_THRESHOLD = 5000
 DEFAULT_CROWN_DENSITY_RATIO = 3.0
 DEFAULT_CROWN_Z_MIN_M = 5.0
 DEFAULT_CROWN_Z_MAX_M = 14.0
@@ -100,11 +102,11 @@ class ScanEstimateConfig:
     crown_bin_height_m: float = DEFAULT_CROWN_BIN_HEIGHT_M
     crown_density_threshold: int = DEFAULT_CROWN_DENSITY_THRESHOLD
     # The effective threshold is max(crown_density_threshold, ratio * trunk
-    # clutter median) so it adapts to the sweep density.  Set
-    # crown_absolute_only to use the absolute threshold alone (the ros2_ws
-    # behaviour, matched to a specific sweep density).
-    crown_density_ratio: float = DEFAULT_CROWN_DENSITY_RATIO
-    crown_absolute_only: bool = False
+    # clutter median) when the ratio is > 0, so it can adapt to an unknown sweep
+    # density.  Set crown_density_ratio = 0 for the pure absolute threshold
+    # (the exact ros2_ws live behaviour).
+    crown_density_ratio: float = 0.0
+    crown_absolute_only: bool = True
     crown_z_min_m: float = DEFAULT_CROWN_Z_MIN_M
     crown_z_max_m: float = DEFAULT_CROWN_Z_MAX_M
     axis_band_m: tuple = DEFAULT_AXIS_BAND_M
@@ -122,8 +124,11 @@ class ScanEstimateConfig:
     # datum (sensor frame).  Robust to stray points below the ground.
     ground_percentile: float = 1.0
     # Fraction of returns that must sit in a +-0.15 m band about the estimated
-    # ground for the ground (and hence the absolute height) to be trusted.
-    ground_band_fraction: float = 0.05
+    # ground for the ground (and hence the absolute height) to be trusted.  A
+    # real ground plane returns a broad, dense low band; a tree-only or
+    # world-registered cloud has almost nothing there.  2% separates the two
+    # without demanding that the ground dominate the cloud.
+    ground_band_fraction: float = 0.02
     # Docking range sensor -> trunk-centreline datum used for ``d_horiz`` when
     # the caller supplies no explicit horizontal distance.
     default_horizontal_distance_m: Optional[float] = None
@@ -326,25 +331,22 @@ def crown_base(cloud: np.ndarray, axis_xy, cfg: ScanEstimateConfig):
     counts, edges = np.histogram(z, bins=bins)
     if counts.size == 0:
         return None, 'none', 'empty histogram'
-    # The density threshold must scale with the sweep density: the offline
-    # 40-step recording puts ~28k points in the crown-base bin but the trunk
-    # clutter is ~100-150/bin, while a sparse 5-step live sweep gives only
-    # ~100-150 canopy points/bin (dock.yaml).  A fixed absolute threshold
-    # therefore either fires on trunk clutter (dense) or never fires (sparse).
-    # Instead, treat the bare-trunk clutter as the baseline and require the
-    # crown bin to exceed it by a clear multiple: the median of the bins below
-    # the crown is the clutter level (the trunk is most of the low histogram).
-    clutter = float(np.median(counts[:max(1, counts.size // 2)]))
-    threshold = max(float(cfg.crown_density_threshold), cfg.crown_density_ratio * clutter)
-    if cfg.crown_absolute_only:
-        threshold = float(cfg.crown_density_threshold)
+    # The density threshold separates bare-trunk clutter from canopy.  The
+    # validated ros2_ws live default is an ABSOLUTE 5000 points/bin for the
+    # dense Mid-360 sweep.  An adaptive floor (ratio * trunk clutter) is offered
+    # for sweeps whose density is unknown, but is OFF by default so this matches
+    # the live estimator exactly.
+    threshold = float(cfg.crown_density_threshold)
+    clutter = 0.0
+    if cfg.crown_density_ratio > 0.0 and not cfg.crown_absolute_only:
+        clutter = float(np.median(counts[:max(1, counts.size // 2)]))
+        threshold = max(threshold, cfg.crown_density_ratio * clutter)
     for index, count in enumerate(counts):
         if count >= threshold:
             return (float(edges[index]), 'density_drop',
                     '{} canopy-annulus points in z=[{:.2f},{:.2f}] >= threshold '
-                    '{:.0f} (clutter median {:.0f})'.format(
-                        count, edges[index], edges[index + 1],
-                        threshold, clutter))
+                    '{:.0f}'.format(
+                        count, edges[index], edges[index + 1], threshold))
     return (None, 'none',
             'max canopy-annulus bin = {} < threshold {:.0f} (scan too sparse)'.format(
                 int(counts.max()) if counts.size else 0, threshold))

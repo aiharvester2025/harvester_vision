@@ -30,10 +30,14 @@ from harvester_dashboard.model.scan_estimate import (
 
 
 def _synthetic_tree(trunk_top_z=12.0, crown_base_z=9.2, axis=(0.0, 0.0),
-                    trunk_r=0.25, n_trunk=4000, n_canopy=20000, ground=0.0,
+                    trunk_r=0.25, n_trunk=20000, n_canopy=120000, ground=0.0,
                     top_offset=(0.05, -0.04), missing_band=None,
                     full_trunk=False):
     """Build a synthetic vertical-trunk + outward-frond cloud (world frame).
+
+    Dense enough that the canopy annulus crosses the production crown-base
+    density threshold (5000 points per 0.25 m bin, the ros2_ws live default), so
+    the tests exercise the real detector rather than a lowered threshold.
 
     By default the trunk is a HALF cylinder (the near side only), matching what a
     single-sided LiDAR sweep actually sees.  This matters: ``estimate_trunk_axis``
@@ -409,6 +413,22 @@ class PlanScanTest(unittest.TestCase):
         self.assertAlmostEqual(PLATFORM_TAIL_M, 1.02)
         self.assertAlmostEqual(EXTENSION_STROKE_M, 9.6)
 
+    def test_defaults_match_the_ros2_ws_live_estimator(self):
+        # These are the live ros2_ws defaults, and getting any of them wrong
+        # shifts the estimate (verified by running their estimator on the same
+        # cloud).  In particular the axis radius must be the MID-TRUNK radius
+        # (0.25), not the wider trunk-top radius (0.35), or the axis is
+        # over-corrected by (2/pi)*(0.35-0.25) ~ 0.06 m.
+        cfg = ScanEstimateConfig()
+        self.assertAlmostEqual(cfg.axis_trunk_radius_m, 0.25)
+        self.assertAlmostEqual(cfg.trunk_cylinder_radius_m, 0.35)
+        self.assertEqual(cfg.crown_density_threshold, 5000)
+        self.assertAlmostEqual(cfg.crown_bin_height_m, 0.25)
+        self.assertAlmostEqual(cfg.crown_z_min_m, 5.0)
+        # The adaptive ratio must be OFF by default so the threshold is exactly
+        # the ros2_ws absolute value.
+        self.assertEqual(cfg.crown_density_ratio, 0.0)
+
 
 class RecordedScanParityTest(unittest.TestCase):
     """Parity against the real recorded tree_scan_002 sweep from the Xavier.
@@ -453,6 +473,17 @@ class RecordedScanParityTest(unittest.TestCase):
         # 9.2 - 2.0 = 7.2, NOT the legacy tree_top - 2.0 = 10.0 that crashed.
         self.assertAlmostEqual(target.docking_height_m, 7.2, delta=0.5)
         self.assertNotAlmostEqual(target.docking_height_m, 10.0, delta=0.5)
+
+    def test_matches_the_ros2_ws_estimator_on_the_same_cloud(self):
+        # The strongest parity check: the live ros2_ws estimate_height() run on
+        # this exact cloud returns height 11.9274, crown 9.25, axis 8.437.  Any
+        # drift in the ported algorithm (defaults, bands, threshold) fails here.
+        tree, _target = plan_scan(self._roi(), frame='world')
+        self.assertTrue(tree.valid, tree.reason)
+        self.assertAlmostEqual(tree.tree_height_m, 11.9274, delta=0.01)
+        self.assertAlmostEqual(tree.crown_base_m, 9.25, delta=0.01)
+        self.assertAlmostEqual(tree.trunk_axis_xy[0], 8.437, delta=0.01)
+        self.assertTrue(tree.trunk_end_valid)
 
     def test_full_estimate_from_the_recording(self):
         # End to end from the recording with NO external distance: the boom rows

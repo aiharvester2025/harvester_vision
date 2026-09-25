@@ -233,8 +233,10 @@ same "never a false green" rule the docking guidance uses).
 - Estimator: `model/scan_estimate.py` (Qt-free, numpy) — the Orin counterpart of
   the validated `ros2_ws` `harvester_dock/live_height_estimator.py`:
   - **Trunk axis** must be radius-corrected for the single-sided (half-cylinder)
-    scan: `median_x + (2/pi)*trunk_radius`.  Without it the axis is biased ~0.22 m
-    toward the sensor (recording check: raw median 8.283 -> 8.506 vs true 8.5).
+    scan: `median_x + (2/pi)*trunk_radius` with the **MID-TRUNK** radius
+    (0.25 m), NOT the wider trunk-top radius (0.35 m) — using the top radius
+    over-corrects the axis by (2/pi)*0.10 ~ 0.06 m and shifts every downstream
+    value.  (recording check: raw median 8.283 + 0.159 = 8.437 vs true 8.5).
   - **Docking height comes from the CROWN BASE (trunk-end), NOT the tree top:**
     `H_dock = crown_base - docking_offset_below_trunk_top_m` (~7.2 m for the
     reference tree).  The legacy `tree_top - 2.0` = 10.0 m lands inside the
@@ -242,10 +244,16 @@ same "never a false green" rule the docking guidance uses).
     into them.  When the crown-base detector fails the target is `NO DATA` — never
     the unsafe fallback.
   - **Crown base** is the canopy-annulus density jump (0.25 m bins, fixed
-    `z_min = 5 m` above harvester self-clutter).  The threshold is
-    `max(crown_density_threshold, ratio * trunk-clutter median)` so it adapts to
-    the sweep density (a dense 40-step recording has ~28k canopy pts/bin vs
-    ~100-150 trunk clutter; a sparse 5-step sweep is far lower).
+    `z_min = 5 m` above harvester self-clutter) with the **absolute**
+    `crown_density_threshold = 5000` points/bin, the ros2_ws live default.  An
+    adaptive floor (`crown_density_ratio`) exists but is OFF by default so the
+    value matches the live estimator exactly.  The detector is a ±1 bin (0.25 m)
+    measurement — live sweeps land at 9.00-9.25 m for the 9.2 m reference.
+  - **`scan_estimate.ScanEstimateConfig` defaults must match the ros2_ws live
+    estimator** (axis radius 0.25, top radius 0.35, threshold 5000, bin 0.25,
+    z_min 5.0).  `RecordedScanParityTest` pins them against the recorded cloud
+    and asserts the same numbers the ros2_ws estimator produces (height 11.9274,
+    crown 9.25, axis 8.437); a default drift fails that test.
   - **Frame matters:** the live MID-360 cloud is sensor-origin, the recorded
     Gazebo cloud is `frame_id: world`; the bridge picks `frame` from the packet
     header.  In the sensor frame with no `ground_z` the ground is ESTIMATED (a
